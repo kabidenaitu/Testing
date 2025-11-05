@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -599,18 +598,10 @@ def build_application() -> Application:
     return application
 
 
-async def main() -> None:
+def main() -> None:
     application = build_application()
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    try:
-        await application.updater.idle()
-    finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
