@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Header } from '@/components/Layout/Header';
 import { Footer } from '@/components/Layout/Footer';
@@ -11,8 +11,15 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { Complaint, MediaFile } from '@/types/complaint';
-import { analyzeComplaint, submitComplaint } from '@/services/api';
+import {
+  AnalyzeResponse,
+  ClarificationHistoryItem,
+  ComplaintDraft,
+  ComplaintPreview,
+  MediaFile,
+  UploadedMedia
+} from '@/types/complaint';
+import { analyzeComplaint, submitComplaint, uploadMedia } from '@/services/api';
 import { toast } from '@/hooks/use-toast';
 import { Loader2, Send } from 'lucide-react';
 import heroImage from '@/assets/hero-transit.jpg';
@@ -21,10 +28,8 @@ import { ClarificationChat } from '@/components/Wizard/ClarificationChat';
 const Index = () => {
   const { t, language } = useLanguage();
   const navigate = useNavigate();
-  const [currentStep, setCurrentStep] = useState(1);
-  const [loading, setLoading] = useState(false);
 
-  // Step 1 state
+  const [currentStep, setCurrentStep] = useState(1);
   const [description, setDescription] = useState('');
   const [files, setFiles] = useState<MediaFile[]>([]);
   const [isAnonymous, setIsAnonymous] = useState(false);
@@ -32,171 +37,258 @@ const Index = () => {
   const [contactPhone, setContactPhone] = useState('');
   const [contactEmail, setContactEmail] = useState('');
 
-  // Step 2 state (clarifications)
-  const [questions, setQuestions] = useState<any[]>([]);
+  const [submissionTimeIso, setSubmissionTimeIso] = useState<string | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<AnalyzeResponse | null>(null);
+  const [clarificationHistory, setClarificationHistory] = useState<ClarificationHistoryItem[]>([]);
+  const [knownFields, setKnownFields] = useState<Record<string, unknown>>({});
+  const [complaintPreview, setComplaintPreview] = useState<ComplaintPreview | null>(null);
+  const [complaintDraft, setComplaintDraft] = useState<ComplaintDraft | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
-  // Step 3 state (preview)
-  const [complaint, setComplaint] = useState<Complaint | null>(null);
+  const steps = useMemo(
+    () => [t('wizard.step1'), t('wizard.step2'), t('wizard.step3'), t('wizard.step4')],
+    [t]
+  );
 
-  const steps = [
-    t('wizard.step1'),
-    t('wizard.step2'),
-    t('wizard.step3'),
-    t('wizard.step4'),
-  ];
+  const resetClarificationState = () => {
+    setClarificationHistory([]);
+    setKnownFields({});
+    setAnalysisResult(null);
+    setComplaintPreview(null);
+    setComplaintDraft(null);
+    setSubmissionTimeIso(null);
+  };
 
-  const handleAnalyze = async () => {
-    if (!description.trim()) {
+  const chooseClarifyingQuestion = (analysis: AnalyzeResponse): string => {
+    if (language === 'kz') {
+      return analysis.clarifyingQuestionKk ?? analysis.clarifyingQuestionRu ?? t('step2.description');
+    }
+
+    return analysis.clarifyingQuestionRu ?? analysis.clarifyingQuestionKk ?? t('step2.description');
+  };
+
+  const ensureMediaUploaded = async (): Promise<UploadedMedia[]> => {
+    const updated: MediaFile[] = [];
+    const uploadedList: UploadedMedia[] = [];
+
+    for (const file of files) {
+      if (file.uploaded) {
+        uploadedList.push(file.uploaded);
+        updated.push(file);
+        continue;
+      }
+
+      try {
+        const uploaded = await uploadMedia(file.file, file.type);
+        updated.push({ ...file, uploaded });
+        uploadedList.push(uploaded);
+      } catch (error) {
+        console.error('Media upload failed', error);
+        toast({
+          title: t('errors.title'),
+          description: t('errors.submitFailed'),
+          variant: 'destructive'
+        });
+        throw error;
+      }
+    }
+
+    setFiles(updated);
+    return uploadedList;
+  };
+
+  const buildPreviewState = async (analysis: AnalyzeResponse): Promise<void> => {
+    const media = await ensureMediaUploaded();
+    const submissionTime = submissionTimeIso ?? new Date().toISOString();
+
+    const contact =
+      !isAnonymous && (contactName.trim() || contactPhone.trim() || contactEmail.trim())
+        ? {
+            name: contactName.trim() || undefined,
+            phone: contactPhone.trim() || undefined,
+            email: contactEmail.trim() || undefined
+          }
+        : undefined;
+
+    const draft: ComplaintDraft = {
+      description,
+      priority: analysis.priority,
+      tuples: analysis.tuples,
+      analysis,
+      media,
+      isAnonymous,
+      contact,
+      source: 'web',
+      submissionTime
+    };
+
+    setComplaintDraft(draft);
+
+    const preview: ComplaintPreview = {
+      description,
+      priority: analysis.priority,
+      tuples: analysis.tuples,
+      mediaFiles: files,
+      isAnonymous,
+      contact,
+      recommendation: analysis.recommendationKk,
+      submissionTime
+    };
+
+    setComplaintPreview(preview);
+    setCurrentStep(3);
+  };
+
+  const processAnalysis = async (
+    analysis: AnalyzeResponse,
+    updatedKnownFields: Record<string, unknown>,
+    currentSubmissionTime: string
+  ) => {
+    setAnalysisResult(analysis);
+    setKnownFields(updatedKnownFields);
+
+    if (analysis.needClarification && analysis.missingSlots.length > 0) {
+      const slot = analysis.missingSlots[0];
+      const question = chooseClarifyingQuestion(analysis);
+
+      setClarificationHistory((prev) => {
+        const existingIndex = prev.findIndex((item) => item.slot === slot);
+        if (existingIndex >= 0) {
+          const copy = [...prev];
+          copy[existingIndex] = {
+            slot,
+            question,
+            answer: copy[existingIndex].answer
+          };
+          return copy;
+        }
+
+        return [...prev, { slot, question }];
+      });
+
+      setSubmissionTimeIso(currentSubmissionTime);
+      setCurrentStep(2);
+      return;
+    }
+
+    await buildPreviewState(analysis);
+    setSubmissionTimeIso(currentSubmissionTime);
+  };
+
+  const runAnalysis = async (updatedKnownFields: Record<string, unknown>) => {
+    const trimmedDescription = description.trim();
+    if (!trimmedDescription) {
       toast({
         title: t('errors.title'),
         description: t('errors.describeSituation'),
-        variant: 'destructive',
+        variant: 'destructive'
       });
       return;
     }
 
-    setLoading(true);
+    setAnalyzing(true);
     try {
-      const response = await analyzeComplaint(description, {});
-      
-      if (response.needsClarification && response.questions.length > 0) {
-        setQuestions(response.questions);
-        setCurrentStep(2);
-      } else {
-        // Go directly to preview if no clarifications needed
-        const newComplaint: Complaint = {
-          description,
-          priority: response.priority,
-          tuples: response.extractedFields.tuples || [],
-          media: files,
-          isAnonymous,
-          contactName: !isAnonymous ? contactName : undefined,
-          contactPhone: !isAnonymous ? contactPhone : undefined,
-          contactEmail: !isAnonymous ? contactEmail : undefined,
-          recommendation: t('step3.defaultRecommendation'),
-          extractedTime: new Date().toLocaleTimeString(language === 'kz' ? 'kk-KZ' : 'ru-RU'),
-        };
-        setComplaint(newComplaint);
-        setCurrentStep(3);
-      }
+      const submissionTime = submissionTimeIso ?? new Date().toISOString();
+      const result = await analyzeComplaint({
+        description: trimmedDescription,
+        knownFields: updatedKnownFields,
+        submissionTimeIso: submissionTime
+      });
+      await processAnalysis(result, updatedKnownFields, submissionTime);
     } catch (error) {
+      console.error('Analyze failed', error);
       toast({
         title: t('errors.title'),
         description: t('errors.analyzeFailed'),
-        variant: 'destructive',
+        variant: 'destructive'
       });
     } finally {
-      setLoading(false);
+      setAnalyzing(false);
     }
   };
 
-  const handleAnswerQuestion = (questionId: string, answer: string) => {
-    setQuestions(prev =>
-      prev.map(q =>
-        q.id === questionId ? { ...q, answered: true, answer } : q
-      )
-    );
+  const handleAnalyze = async () => {
+    resetClarificationState();
+    setCurrentStep(1);
+    await runAnalysis({});
   };
 
-  const handleClarificationsComplete = () => {
-    const answeredQuestions = questions.filter(q => q.answered);
-    const extractedData: any = {};
-    
-    answeredQuestions.forEach(q => {
-      if (q.field && q.answer) {
-        extractedData[q.field] = q.answer;
-      }
-    });
+  const handleClarificationAnswer = async (slot: string, answer: string) => {
+    const updatedHistory = clarificationHistory.map((item) =>
+      item.slot === slot ? { ...item, answer } : item
+    );
+    setClarificationHistory(updatedHistory);
 
-    const newComplaint: Complaint = {
-      description,
-      priority: 'medium',
-      tuples: [
-        {
-          route: extractedData.route,
-          time: extractedData.time,
-          location: extractedData.location,
-          aspect: extractedData.aspect,
-        },
-      ],
-      media: files,
-      isAnonymous,
-      contactName: !isAnonymous ? contactName : undefined,
-      contactPhone: !isAnonymous ? contactPhone : undefined,
-      contactEmail: !isAnonymous ? contactEmail : undefined,
-      recommendation: t('step3.defaultRecommendation'),
-      extractedTime: new Date().toLocaleTimeString(language === 'kz' ? 'kk-KZ' : 'ru-RU'),
-    };
-
-    setComplaint(newComplaint);
-    setCurrentStep(3);
+    const updatedFields = { ...knownFields, [slot]: answer };
+    await runAnalysis(updatedFields);
   };
 
   const handleSubmit = async () => {
-    if (!complaint) return;
+    if (!complaintDraft) {
+      return;
+    }
 
-    setLoading(true);
+    setSubmitting(true);
     try {
-      const response = await submitComplaint(complaint);
+      const media = await ensureMediaUploaded();
+      const payload: ComplaintDraft = { ...complaintDraft, media };
+      const response = await submitComplaint(payload);
       toast({
         title: t('step4.success'),
-        description: `${t('step4.referenceNumber')}: ${response.referenceNumber}`,
+        description: `${t('step4.referenceNumber')}: ${response.referenceNumber}`
       });
       navigate('/success', { state: { referenceNumber: response.referenceNumber } });
     } catch (error) {
+      console.error('Submit failed', error);
       toast({
         title: t('errors.title'),
         description: t('errors.submitFailed'),
-        variant: 'destructive',
+        variant: 'destructive'
       });
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
+
+  const currentQuestion = clarificationHistory.find((item) => !item.answer);
 
   return (
     <div className="flex min-h-screen flex-col">
       <Header />
-      
+
       <main className="flex-1">
-        {/* Hero Section */}
         <section className="relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-hero opacity-40" />
           <div className="container relative mx-auto px-4 py-16 md:px-6 md:py-24">
-            <div className="grid gap-8 lg:grid-cols-2 lg:gap-12 items-center">
+            <div className="grid items-center gap-8 lg:grid-cols-2 lg:gap-12">
               <div className="animate-fade-in">
                 <h1 className="mb-4">{t('hero.title')}</h1>
-                <p className="mb-8 text-xl text-muted-foreground">
-                  {t('hero.description')}
-                </p>
+                <p className="mb-8 text-xl text-muted-foreground">{t('hero.description')}</p>
                 {currentStep === 1 && (
                   <Button
                     size="lg"
                     className="h-14 px-8 text-lg shadow-medium"
-                    onClick={() => document.getElementById('wizard')?.scrollIntoView({ behavior: 'smooth' })}
+                    onClick={() =>
+                      document.getElementById('wizard')?.scrollIntoView({ behavior: 'smooth' })
+                    }
                   >
                     {t('hero.submitButton')}
                   </Button>
                 )}
               </div>
               <div className="animate-slide-up">
-                <img
-                  src={heroImage}
-                  alt="Public Transit"
-                  className="rounded-2xl shadow-large"
-                />
+                <img src={heroImage} alt="Public Transit" className="rounded-2xl shadow-large" />
               </div>
             </div>
           </div>
         </section>
 
-        {/* Wizard Section */}
         <section id="wizard" className="bg-muted/30 py-16">
           <div className="container mx-auto max-w-4xl px-4 md:px-6">
             <Stepper steps={steps} currentStep={currentStep} />
 
             <div className="mt-8 rounded-2xl border bg-card p-6 shadow-medium md:p-8">
-              {/* Step 1: Description */}
               {currentStep === 1 && (
                 <div className="space-y-6 animate-fade-in">
                   <div>
@@ -208,7 +300,7 @@ const Index = () => {
                       placeholder={t('step1.placeholder')}
                       className="mt-2 min-h-[200px] text-lg"
                       value={description}
-                      onChange={(e) => setDescription(e.target.value)}
+                      onChange={(event) => setDescription(event.target.value)}
                     />
                   </div>
 
@@ -227,13 +319,13 @@ const Index = () => {
                     </div>
 
                     {!isAnonymous && (
-                      <div className="grid gap-4 pt-4 md:grid-cols-3 animate-fade-in">
+                      <div className="grid animate-fade-in gap-4 pt-4 md:grid-cols-3">
                         <div>
                           <Label htmlFor="name">{t('step1.contactName')}</Label>
                           <Input
                             id="name"
                             value={contactName}
-                            onChange={(e) => setContactName(e.target.value)}
+                            onChange={(event) => setContactName(event.target.value)}
                             className="mt-1"
                           />
                         </div>
@@ -242,7 +334,7 @@ const Index = () => {
                           <Input
                             id="phone"
                             value={contactPhone}
-                            onChange={(e) => setContactPhone(e.target.value)}
+                            onChange={(event) => setContactPhone(event.target.value)}
                             className="mt-1"
                           />
                         </div>
@@ -252,7 +344,7 @@ const Index = () => {
                             id="email"
                             type="email"
                             value={contactEmail}
-                            onChange={(e) => setContactEmail(e.target.value)}
+                            onChange={(event) => setContactEmail(event.target.value)}
                             className="mt-1"
                           />
                         </div>
@@ -264,9 +356,9 @@ const Index = () => {
                     size="lg"
                     className="w-full gap-2 text-lg"
                     onClick={handleAnalyze}
-                    disabled={loading}
+                    disabled={analyzing}
                   >
-                    {loading ? (
+                    {analyzing ? (
                       <>
                         <Loader2 className="h-5 w-5 animate-spin" />
                         {t('step1.analyze')}...
@@ -281,23 +373,21 @@ const Index = () => {
                 </div>
               )}
 
-              {/* Step 2: Clarifications */}
-              {currentStep === 2 && (
+              {currentStep === 2 && clarificationHistory.length > 0 && currentQuestion && (
                 <ClarificationChat
-                  questions={questions}
-                  onAnswer={handleAnswerQuestion}
-                  onComplete={handleClarificationsComplete}
+                  history={clarificationHistory}
+                  onSubmitAnswer={handleClarificationAnswer}
+                  isProcessing={analyzing}
                 />
               )}
 
-              {/* Step 3: Preview */}
-              {currentStep === 3 && complaint && (
+              {currentStep === 3 && complaintPreview && complaintDraft && (
                 <div className="space-y-6">
-                  <ComplaintCard complaint={complaint} showEdit={false} />
-                  
+                  <ComplaintCard complaint={complaintPreview} />
+
                   <div className="flex gap-4">
                     <Button
-                      variant="outline"
+                      variant='outline'
                       size="lg"
                       className="flex-1"
                       onClick={() => setCurrentStep(1)}
@@ -308,9 +398,9 @@ const Index = () => {
                       size="lg"
                       className="flex-1 gap-2"
                       onClick={handleSubmit}
-                      disabled={loading}
+                      disabled={submitting}
                     >
-                      {loading ? (
+                      {submitting ? (
                         <>
                           <Loader2 className="h-5 w-5 animate-spin" />
                           {t('step3.submit')}...

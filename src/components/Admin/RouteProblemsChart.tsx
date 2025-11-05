@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
+import { useLanguage } from '@/contexts/LanguageContext';
 
 interface RouteData {
   route: string;
@@ -12,57 +13,54 @@ interface Props {
 
 export const RouteProblemsChart = ({ data = [] }: Props) => {
   const chartRef = useRef<HTMLDivElement>(null);
+  const { t } = useLanguage();
 
   useEffect(() => {
-    if (!chartRef.current) return;
+    if (!chartRef.current) {
+      return;
+    }
 
     const chart = echarts.init(chartRef.current);
 
-    const mockData: RouteData[] = data.length > 0 ? data : [
-      { route: '№10', count: 45 },
-      { route: '№23', count: 38 },
-      { route: '№5', count: 32 },
-      { route: '№18', count: 28 },
-      { route: '№7', count: 24 },
-    ];
+    const seriesData = data.slice(0, 10);
 
     const option = {
       tooltip: {
         trigger: 'axis',
-        axisPointer: { type: 'shadow' },
+        axisPointer: { type: 'shadow' }
       },
       grid: {
         left: '3%',
         right: '4%',
         bottom: '3%',
-        containLabel: true,
+        containLabel: true
       },
       xAxis: {
         type: 'category',
-        data: mockData.map(d => d.route),
+        data: seriesData.map((item) => item.route),
         axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))' },
+        axisLabel: { color: 'hsl(var(--foreground))' }
       },
       yAxis: {
         type: 'value',
         axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
         axisLabel: { color: 'hsl(var(--foreground))' },
-        splitLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.1)' } },
+        splitLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.1)' } }
       },
       series: [
         {
-          data: mockData.map(d => d.count),
+          data: seriesData.map((item) => item.count),
           type: 'bar',
           itemStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
               { offset: 0, color: 'hsl(var(--priority-high))' },
-              { offset: 1, color: 'hsl(var(--priority-medium))' },
+              { offset: 1, color: 'hsl(var(--priority-medium))' }
             ]),
-            borderRadius: [8, 8, 0, 0],
+            borderRadius: [8, 8, 0, 0]
           },
-          animationDuration: 1000,
-        },
-      ],
+          animationDuration: 600
+        }
+      ]
     };
 
     chart.setOption(option);
@@ -74,7 +72,16 @@ export const RouteProblemsChart = ({ data = [] }: Props) => {
       window.removeEventListener('resize', handleResize);
       chart.dispose();
     };
-  }, [data]);
+  }, [data, t]);
 
-  return <div ref={chartRef} className="h-64 w-full" />;
+  return (
+    <div className="relative h-64 w-full">
+      <div ref={chartRef} className="h-full w-full" />
+      {data.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+          {t('admin.noData')}
+        </div>
+      )}
+    </div>
+  );
 };

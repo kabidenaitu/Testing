@@ -25,25 +25,14 @@ export const HeatmapChart = ({ data = [] }: Props) => {
     const dayKeys = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
     const days = dayKeys.map((key) => t(`charts.days.${key}`));
 
-    // Generate mock data if not provided
-    const mockData: HeatmapData[] = data.length > 0 ? data : [];
-    if (mockData.length === 0) {
-      for (let d = 0; d < 7; d++) {
-        for (let h = 0; h < 24; h++) {
-          const isRushHour = (h >= 7 && h <= 9) || (h >= 17 && h <= 19);
-          const isWeekday = d < 5;
-          const baseCount = isRushHour && isWeekday ? 15 : 5;
-          mockData.push({
-            day: d,
-            hour: h,
-            count: baseCount + Math.floor(Math.random() * 10),
-          });
-        }
-      }
-    }
+    const normalized = data.map((item) => ({
+      day: Math.max(0, Math.min(6, (item.day ?? 1) - 1)),
+      hour: Math.max(0, Math.min(23, item.hour ?? 0)),
+      count: item.count ?? 0
+    }));
 
-    const chartData = mockData.map(item => [item.hour, item.day, item.count]);
-    const maxCount = Math.max(...mockData.map(d => d.count));
+    const chartData = normalized.map((item) => [item.hour, item.day, item.count]);
+    const maxCount = normalized.length > 0 ? Math.max(...normalized.map((d) => d.count)) : 1;
 
     const option = {
       tooltip: {
@@ -121,5 +110,14 @@ export const HeatmapChart = ({ data = [] }: Props) => {
     };
   }, [data, language, t]);
 
-  return <div ref={chartRef} className="h-64 w-full" />;
+  return (
+    <div className="relative h-64 w-full">
+      <div ref={chartRef} className="h-full w-full" />
+      {data.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+          {t('admin.noData')}
+        </div>
+      )}
+    </div>
+  );
 };
