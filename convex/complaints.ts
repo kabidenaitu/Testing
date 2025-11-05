@@ -1,5 +1,11 @@
 import { v, type Infer } from 'convex/values';
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import {
+  mutation,
+  query,
+  type MutationCtx,
+  type QueryCtx
+} from './_generated/server';
+import type { FilterBuilder, IndexRangeBuilder } from 'convex/server';
 
 const priorityValidator = v.union(
   v.literal('low'),
@@ -69,7 +75,7 @@ export const create = mutation({
   args: {
     payload: complaintPayload
   },
-  handler: async (ctx: MutationCtx<DataModel>, args) => {
+  handler: async (ctx: MutationCtx, args) => {
     const { payload } = args;
     const nowIso = new Date().toISOString();
     const submissionTime = payload.submissionTime ?? nowIso;
@@ -122,22 +128,28 @@ export const list = query({
       })
     )
   },
-  handler: async (ctx: QueryCtx<DataModel>, args) => {
+  handler: async (ctx: QueryCtx, args) => {
     const limit = normalizeLimit(args.limit);
     const filters = args.filters ?? {};
 
     let query = ctx.db.query('complaints').withIndex('by_submission_time');
 
     if (filters.priority) {
-      query = query.filter((q) => q.eq(q.field('priority'), filters.priority));
+      query = query.filter((builder: FilterBuilder<any>) =>
+        builder.eq(builder.field('priority'), filters.priority)
+      );
     }
 
     if (filters.source) {
-      query = query.filter((q) => q.eq(q.field('source'), filters.source));
+      query = query.filter((builder: FilterBuilder<any>) =>
+        builder.eq(builder.field('source'), filters.source)
+      );
     }
 
     if (filters.status) {
-      query = query.filter((q) => q.eq(q.field('status'), filters.status));
+      query = query.filter((builder: FilterBuilder<any>) =>
+        builder.eq(builder.field('status'), filters.status)
+      );
     }
 
     return query.order('desc').paginate({
@@ -164,7 +176,7 @@ function normalizeLimit(limit?: number | null) {
 }
 
 async function upsertDictionaries(
-  ctx: MutationCtx<DataModel>,
+  ctx: MutationCtx,
   params: {
     tuples: Infer<typeof tupleValidator>[];
     submissionTime: string;
@@ -191,7 +203,7 @@ async function upsertDictionaries(
 }
 
 async function upsertDictValue(
-  ctx: MutationCtx<DataModel>,
+  ctx: MutationCtx,
   kind: 'route' | 'place' | 'stop' | 'plate',
   rawValue: string,
   timestampIso: string
@@ -203,7 +215,10 @@ async function upsertDictValue(
 
   const existing = await ctx.db
     .query('dict_values')
-    .withIndex('by_kind_value', (q) => q.eq('kind', kind).eq('value', value))
+    .withIndex(
+      'by_kind_value',
+      (builder: IndexRangeBuilder<any, any>) => builder.eq('kind', kind).eq('value', value)
+    )
     .first();
 
   if (existing) {
