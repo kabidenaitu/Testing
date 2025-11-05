@@ -1,9 +1,12 @@
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -36,6 +39,18 @@ API_BASE = (api_base_raw or "http://localhost:8787").rstrip("/")
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "kk").strip().lower()
 if DEFAULT_LANGUAGE not in {"kk", "ru"}:
     DEFAULT_LANGUAGE = "kk"
+
+LOCAL_TIMEZONE_NAME = os.getenv("LOCAL_TIMEZONE", "Asia/Almaty").strip() or "Asia/Almaty"
+try:
+    LOCAL_TIMEZONE = ZoneInfo(LOCAL_TIMEZONE_NAME)
+except ZoneInfoNotFoundError:
+    logger.warning(
+        "Не удалось загрузить временную зону %s, используем UTC по умолчанию.",
+        LOCAL_TIMEZONE_NAME,
+    )
+    LOCAL_TIMEZONE = timezone.utc
+
+TRACKING_URL_TEMPLATE = os.getenv("TRACKING_URL_TEMPLATE", "https://qalavoice.kz/#status").strip()
 
 
 def _read_timeout(name: str, default: float) -> float:
@@ -96,6 +111,8 @@ class SessionState:
     pending_slot: Optional[str] = None
     analysis: Optional[AnalyzeResponse] = None
     media: List[Dict[str, Any]] = field(default_factory=list)
+    reanalysis_in_progress: bool = False
+    last_answer_slot: Optional[str] = None
 
 
 # Наборы текстов на двух языках.
@@ -122,6 +139,8 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "confirm": "Бәрі дұрыс па? Шағымды жіберу керек пе?",
         "confirm_yes": "Жіберу",
         "confirm_no": "Түзету",
+        "tracking_prompt": "🔎 Статусты бақылау үшін сілтемені пайдаланыңыз:",
+        "tracking_button": "Статусты тексеру",
         "submit_ok": (
           "✅ Шағым жіберілді! Рақмет.\n"
           "Анықтамалық нөмірі: {reference}"
@@ -157,6 +176,8 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "confirm": "Все верно? Отправляем жалобу?",
         "confirm_yes": "Отправить",
         "confirm_no": "Исправить",
+        "tracking_prompt": "🔎 Проверьте статус вашей жалобы по ссылке:",
+        "tracking_button": "Проверить статус",
         "submit_ok": (
           "✅ Жалоба успешно отправлена! Спасибо.\n"
           "Номер отслеживания: {reference}"
@@ -212,6 +233,62 @@ ASPECT_LABELS = {
 }
 
 LANGUAGE_BUTTON_LABELS: Dict[Literal["kk", "ru"], str] = {"kk": "Қазақша", "ru": "Русский"}
+
+PLACE_LABELS = {
+    "kk": {
+        "stop": "Аялдама",
+        "street": "Көше",
+        "crossroad": "Қиылыс",
+    },
+    "ru": {
+        "stop": "Остановка",
+        "street": "Улица",
+        "crossroad": "Перекрёсток",
+    },
+}
+
+PREVIEW_FIELD_LABELS = {
+    "kk": {
+        "priority": "Приоритет",
+        "submitted_at": "Өтініш берілген уақыт",
+        "routes": "Бағыттар",
+        "plates": "Мемнөмірлер",
+        "place": "Оқиға орны",
+        "time": "Оқиға уақыты",
+        "aspects": "Негізгі аспектілер",
+        "recommendation": "Ұсыныс",
+        "description": "Сипаттама",
+        "attachments": "Файлдар",
+        "tuples": "Қосымша мәліметтер",
+    },
+    "ru": {
+        "priority": "Приоритет",
+        "submitted_at": "Время обращения",
+        "routes": "Маршруты",
+        "plates": "Госномера",
+        "place": "Место",
+        "time": "Время происшествия",
+        "aspects": "Ключевые аспекты",
+        "recommendation": "Рекомендация",
+        "description": "Описание",
+        "attachments": "Вложения",
+        "tuples": "Дополнительные детали",
+    },
+}
+
+PREVIEW_ICONS = {
+    "priority": "🔴",
+    "submitted_at": "🕒",
+    "routes": "🚌",
+    "plates": "🚐",
+    "place": "📍",
+    "time": "⏰",
+    "aspects": "⚠️",
+    "recommendation": "💡",
+    "description": "📝",
+    "attachments": "📎",
+    "tuples": "🗂",
+}
 
 
 def build_language_keyboard(current: Literal["kk", "ru"]) -> InlineKeyboardMarkup:
@@ -293,10 +370,178 @@ def reset_session(session: SessionState) -> None:
     session.pending_slot = None
     session.analysis = None
     session.media = []
+    session.reanalysis_in_progress = False
+    session.last_answer_slot = None
 
 
 def choose_text(session: SessionState, key: str) -> str:
     return TEXTS[session.language][key]
+
+
+def build_tracking_url(reference: str) -> Optional[str]:
+    if not reference or reference == "-" or not TRACKING_URL_TEMPLATE:
+        return None
+
+    template = TRACKING_URL_TEMPLATE
+    if "{reference}" in template:
+        return template.replace("{reference}", reference)
+
+    if "#" in template:
+        base, anchor = template.split("#", 1)
+        anchor_part = f"#{anchor}"
+    else:
+        base, anchor_part = template, ""
+
+    base = base.rstrip()
+    if not base:
+        return None
+
+    if base.endswith(("?", "&")):
+        url = f"{base}ref={reference}{anchor_part}"
+    elif "?" in base:
+        url = f"{base}&ref={reference}{anchor_part}"
+    else:
+        separator = "?"
+        url = f"{base}{separator}ref={reference}{anchor_part}"
+    return url
+
+
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def format_submission_timestamp(session: SessionState) -> Optional[str]:
+    dt = parse_iso_datetime(session.submission_time)
+    if not dt:
+        return None
+    local_dt = dt.astimezone(LOCAL_TIMEZONE)
+    date_part = local_dt.strftime("%d.%m.%Y")
+    time_part = local_dt.strftime("%H:%M")
+    return f"{date_part} · {time_part}"
+
+
+def format_incident_time_value(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw or raw.lower() == "unspecified":
+        return None
+    dt = parse_iso_datetime(raw)
+    if dt:
+        return dt.astimezone(LOCAL_TIMEZONE).strftime("%H:%M")
+
+    match = re.match(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})", raw)
+    if match:
+        hour = int(match.group("hour")) % 24
+        minute = match.group("minute")
+        return f"{hour:02d}:{minute}"
+
+    return raw
+
+
+def gather_tuple_highlights(analysis: AnalyzeResponse, language: Literal["kk", "ru"]) -> Dict[str, Optional[str]]:
+    tuples = analysis.get("tuples") or []
+
+    routes: List[str] = []
+    plates: List[str] = []
+    places: List[str] = []
+    times: List[str] = []
+
+    place_labels = PLACE_LABELS[language]
+
+    for item in tuples:
+        objects = item.get("objects") or []
+        for obj in objects:
+            value = str(obj.get("value", "")).strip()
+            if not value:
+                continue
+            if obj.get("type") == "route":
+                routes.append(escape(value))
+            elif obj.get("type") == "bus_plate":
+                plates.append(escape(value))
+
+        place = item.get("place") or {}
+        kind = place.get("kind")
+        place_value = str(place.get("value", "")).strip()
+        if kind in place_labels and place_value:
+            label = place_labels[kind]
+            places.append(f"{label} «{escape(place_value)}»")
+        elif place_value:
+            places.append(escape(place_value))
+
+        formatted_time = format_incident_time_value(item.get("time"))
+        if formatted_time:
+            times.append(escape(formatted_time))
+
+    extracted = analysis.get("extractedFields") or {}
+
+    if not routes:
+        routes = [
+            escape(str(route).strip())
+            for route in extracted.get("routeNumbers", [])
+            if str(route).strip()
+        ]
+
+    if not plates:
+        plates = [
+            escape(str(plate).strip())
+            for plate in extracted.get("busPlates", [])
+            if str(plate).strip()
+        ]
+
+    if not places:
+        places = [
+            escape(str(place).strip())
+            for place in extracted.get("places", [])
+            if str(place).strip()
+        ]
+
+    def unique(values: List[str]) -> Optional[str]:
+        seen = set()
+        ordered: List[str] = []
+        for val in values:
+            if val and val not in seen:
+                seen.add(val)
+                ordered.append(val)
+        if not ordered:
+            return None
+        return ", ".join(ordered)
+
+    return {
+        "routes": unique(routes),
+        "plates": unique(plates),
+        "place": unique(places),
+        "time": unique(times),
+    }
+
+
+def escape_multiline(text: str) -> str:
+    escaped = escape(text)
+    return escaped.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def combine_clarification(existing: Optional[str], addition: str) -> str:
+    addition = addition.strip()
+    if not addition:
+        return existing or ""
+    if not existing:
+        return addition
+    if addition in existing:
+        return existing
+    return f"{existing}\n{addition}"
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -402,16 +647,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if session.stage == "clarification":
-        if not session.pending_slot:
+        slot = session.pending_slot or session.last_answer_slot
+        if not slot:
             session.stage = "description"
             await message.reply_text(choose_text(session, "ask_description"))
             return
 
-        session.known_fields[session.pending_slot] = text
-        session.clarifications[session.pending_slot] = text
-        session.pending_slot = None
+        combined_value = combine_clarification(session.known_fields.get(slot), text)
+        session.known_fields[slot] = combined_value
+        session.clarifications[slot] = combined_value
+        session.last_answer_slot = slot
+
+        if session.reanalysis_in_progress:
+            await message.reply_text(choose_text(session, "clarification_saved"))
+            return
+
+        session.reanalysis_in_progress = True
         await message.reply_text(choose_text(session, "clarification_saved"))
-        await run_analysis(update, context, session)
+        try:
+            await run_analysis(update, context, session)
+        finally:
+            session.reanalysis_in_progress = False
+
+        if session.stage != "clarification":
+            session.pending_slot = None
+            session.last_answer_slot = None
+        else:
+            session.last_answer_slot = session.pending_slot
+        return
 
 
 async def run_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, session: SessionState) -> None:
@@ -470,7 +733,7 @@ async def run_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
         )
         return
 
-    await show_preview(update, session)
+    await show_preview(update, context, session)
     session.stage = "confirmation"
 
 
@@ -500,24 +763,22 @@ def pick_question(analysis: AnalyzeResponse, language: Literal["kk", "ru"]) -> s
     return analysis.get("clarifyingQuestionRu") or analysis.get("clarifyingQuestionKk") or ""
 
 
-async def show_preview(update: Update, session: SessionState) -> None:
+async def show_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    session: SessionState,
+) -> None:
     analysis = session.analysis
     if not analysis:
         await update.message.reply_text(choose_text(session, "analyze_error"))
         return
 
-    priority = PRIORITY_LABELS[session.language][analysis["priority"]]
-    aspects = format_aspects(analysis.get("aspectsCount") or {}, session.language)
-    tuples = format_tuples(analysis.get("tuples") or [], session.language, session)
-    recommendation = choose_recommendation_text(analysis, session)
-
-    summary = choose_text(session, "preview_summary").format(
-        priority=priority,
-        aspects=aspects,
-        tuples=tuples,
-        recommendation=recommendation
+    summary_body = render_preview_summary(session)
+    summary = (
+        f"{choose_text(session, 'preview_title')}\n\n"
+        f"{summary_body}\n\n"
+        f"{choose_text(session, 'confirm')}"
     )
-    summary = f"{summary}\n\n{choose_text(session, 'confirm')}"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -534,16 +795,7 @@ async def show_preview(update: Update, session: SessionState) -> None:
         ]
     )
 
-    await update.message.reply_text(
-        choose_text(session, "preview_title"),
-        parse_mode=ParseMode.HTML,
-    )
-    await update.message.reply_text(
-        summary,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-        disable_web_page_preview=True,
-    )
+    await send_html_message(update, context, summary, reply_markup=keyboard)
 
 
 def choose_recommendation_text(analysis: AnalyzeResponse, session: SessionState) -> str:
@@ -577,36 +829,6 @@ def format_tuples(
     if not tuples:
         return choose_text(session, "no_tuples")
 
-    from html import escape  # local import to avoid global dependency if HTML not used
-
-    labels = {
-        "ru": {
-            "route": "Маршрут",
-            "bus_plate": "Госномер",
-            "time": "Время",
-            "aspects": "Аспекты",
-            "place": {
-                "stop": "Остановка",
-                "street": "Улица",
-                "crossroad": "Перекрёсток",
-            },
-        },
-        "kk": {
-            "route": "Бағыт",
-            "bus_plate": "Мемнөмір",
-            "time": "Уақыты",
-            "aspects": "Аспектілер",
-            "place": {
-                "stop": "Аялдама",
-                "street": "Көше",
-                "crossroad": "Қиылыс",
-            },
-        },
-    }
-
-    lang_labels = labels[language]
-    place_labels = lang_labels["place"]
-
     lines: List[str] = []
     for idx, item in enumerate(tuples, start=1):
         objects = item.get("objects") or []
@@ -627,25 +849,120 @@ def format_tuples(
 
         parts: List[str] = []
         if routes:
-            parts.append(f"<b>{lang_labels['route']}:</b> {', '.join(routes)}")
+            parts.append(
+                f"{PREVIEW_ICONS['routes']} <b>{PREVIEW_FIELD_LABELS[language]['routes']}:</b> {', '.join(routes)}"
+            )
         if plates:
-            parts.append(f"<b>{lang_labels['bus_plate']}:</b> {', '.join(plates)}")
-        if place_kind in place_labels and place_value:
-            parts.append(f"<b>{place_labels[place_kind]}:</b> {place_value}")
+            parts.append(
+                f"{PREVIEW_ICONS['plates']} <b>{PREVIEW_FIELD_LABELS[language]['plates']}:</b> {', '.join(plates)}"
+            )
+        if place_kind in PLACE_LABELS[language] and place_value:
+            parts.append(
+                f"{PREVIEW_ICONS['place']} <b>{PLACE_LABELS[language][place_kind]}:</b> {place_value}"
+            )
+        elif place_value:
+            parts.append(f"{PREVIEW_ICONS['place']} {place_value}")
 
-        time_value = escape(str(item.get("time", "")).strip())
-        if time_value and time_value.lower() != "unspecified":
-            parts.append(f"<b>{lang_labels['time']}:</b> {time_value}")
+        time_value = format_incident_time_value(item.get("time"))
+        if time_value:
+            parts.append(
+                f"{PREVIEW_ICONS['time']} <b>{PREVIEW_FIELD_LABELS[language]['time']}:</b> {escape(time_value)}"
+            )
 
         aspects = item.get("aspects") or []
         if aspects:
             label_map = ASPECT_LABELS[language]
             mapped = ", ".join(label_map.get(a, a) for a in aspects)
-            parts.append(f"<b>{lang_labels['aspects']}:</b> {escape(mapped)}")
+            parts.append(
+                f"{PREVIEW_ICONS['aspects']} <b>{PREVIEW_FIELD_LABELS[language]['aspects']}:</b> {escape(mapped)}"
+            )
 
-        content = "; ".join(parts) if parts else "—"
-        lines.append(f"{idx}. {content}")
+        content = "\n".join(parts) if parts else "—"
+        lines.append(f"<b>{idx}.</b> {content}")
     return "\n".join(lines)
+
+
+def render_preview_summary(session: SessionState) -> str:
+    analysis = session.analysis or AnalyzeResponse()
+    language = session.language
+    labels = PREVIEW_FIELD_LABELS[language]
+    icons = PREVIEW_ICONS
+
+    priority_raw = analysis.get("priority", "medium")
+    priority_label = PRIORITY_LABELS[language].get(priority_raw, priority_raw)
+
+    highlights = gather_tuple_highlights(analysis, language)
+    aspects_value = format_aspects(analysis.get("aspectsCount") or {}, language)
+    tuples_section = format_tuples(analysis.get("tuples") or [], language, session)
+    recommendation_text = choose_recommendation_text(analysis, session)
+
+    fields: List[str] = []
+
+    def add_field(key: str, value: Optional[str]) -> None:
+        if value is None:
+            return
+        icon = icons.get(key, "•")
+        label = labels[key]
+        fields.append(f"{icon} <b>{label}:</b> {value}")
+
+    add_field("priority", escape(priority_label))
+
+    submitted_at = format_submission_timestamp(session)
+    if submitted_at:
+        add_field("submitted_at", escape(submitted_at))
+
+    add_field("place", highlights.get("place") or "—")
+    add_field("time", highlights.get("time") or "—")
+    add_field("routes", highlights.get("routes") or "—")
+    add_field("plates", highlights.get("plates") or "—")
+    add_field("aspects", escape(aspects_value))
+
+    attachments_value = str(len(session.media)) if session.media else "—"
+    add_field("attachments", attachments_value)
+
+    sections: List[str] = ["\n".join(fields)]
+
+    description_text = (session.description or "").strip()
+    if description_text:
+        sections.append(
+            f"{icons['description']} <b>{labels['description']}:</b>\n{escape_multiline(description_text)}"
+        )
+
+    if tuples_section:
+        sections.append(f"{icons['tuples']} <b>{labels['tuples']}:</b>\n{tuples_section}")
+
+    if recommendation_text.strip() and recommendation_text.strip() != "-":
+        sections.append(
+            f"{icons['recommendation']} <b>{labels['recommendation']}:</b> {escape_multiline(recommendation_text)}"
+        )
+
+    return "\n\n".join(section for section in sections if section)
+
+
+async def send_html_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
+    chat = update.effective_chat
+    if update.message:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+    elif chat:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+    else:
+        logger.warning("Не удалось отправить сообщение предпросмотра: отсутствует контекст чата.")
 
 
 async def handle_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -716,6 +1033,25 @@ async def finalize_submission(
     await query.edit_message_text(
       choose_text(session, "submit_ok").format(reference=reference)
     )
+
+    tracking_url = build_tracking_url(reference)
+    if tracking_url and query.message:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        choose_text(session, "tracking_button"),
+                        url=tracking_url,
+                    )
+                ]
+            ]
+        )
+        await query.message.reply_text(
+            choose_text(session, "tracking_prompt"),
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+
     reset_session(session)
 
 

@@ -56,7 +56,7 @@ const Admin = () => {
           <AdminLogin onSuccess={handleLoginSuccess} />
         )}
       </main>
-      <Footer />
+      <Footer showLinks={false} />
     </div>
   );
 };
@@ -297,7 +297,7 @@ const AdminDashboard = ({ authorization, onLogout }: AdminDashboardProps) => {
         </div>
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2">
+      <section className="flex flex-col gap-8">
         <AnalyticsCard
           title={t('admin.cards.routes')}
           loading={loadingCharts}
@@ -329,7 +329,7 @@ const AdminDashboard = ({ authorization, onLogout }: AdminDashboardProps) => {
         >
           <HeatmapChart data={heatmapData} />
         </AnalyticsCard>
-      </div>
+      </section>
 
       <div className="mt-6 rounded-2xl border bg-card p-6 shadow-soft">
         <h3 className="mb-4">{t('admin.complaints')}</h3>
@@ -614,19 +614,29 @@ interface AnalyticsCardProps {
   loadingLabel: string;
 }
 
-const AnalyticsCard = ({ title, children, loading = false, loadingLabel }: AnalyticsCardProps) => {
-  return (
-    <div className="rounded-2xl border bg-card p-6 shadow-soft">
-      <h3 className="mb-4">{title}</h3>
-      {loading ? <LoadingState label={loadingLabel} /> : children}
+const AnalyticsCard = ({ title, children, loading = false, loadingLabel }: AnalyticsCardProps) => (
+  <article className="relative overflow-hidden rounded-3xl border border-border/60 bg-card/80 p-8 shadow-xl">
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5"
+    />
+    <div className="relative flex h-full flex-col gap-6">
+      <h3 className="text-2xl font-semibold tracking-tight">{title}</h3>
+      {loading ? (
+        <LoadingState label={loadingLabel} />
+      ) : (
+        <div className="rounded-2xl border border-border/40 bg-background/70 p-4">
+          {children}
+        </div>
+      )}
     </div>
-  );
-};
+  </article>
+);
 
 const LoadingState = ({ label }: { label: string }) => (
-  <div className="flex h-64 items-center justify-center text-muted-foreground">
-    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-    <span>{label}</span>
+  <div className="flex h-[26rem] items-center justify-center rounded-2xl border border-dashed border-border/60 bg-card/60 text-muted-foreground">
+    <Loader2 className="mr-3 h-6 w-6 animate-spin" />
+    <span className="text-sm font-medium uppercase tracking-wide">{label}</span>
   </div>
 );
 

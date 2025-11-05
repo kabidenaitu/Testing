@@ -88,7 +88,7 @@ export const PriorityDistributionChart = ({ data = [] }: Props) => {
   }, [orderedData, t]);
 
   return (
-    <div className="relative h-64 w-full">
+    <div className="relative h-[26rem] w-full md:h-[32rem]">
       <div ref={chartRef} className="h-full w-full" />
       {total === 0 && (
         <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
