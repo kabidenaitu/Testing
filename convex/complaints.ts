@@ -1,6 +1,5 @@
-import { mutationGeneric, queryGeneric, type QueryCtx, type MutationCtx } from 'convex/server';
 import { v, type Infer } from 'convex/values';
-import type { DataModel } from './_generated/dataModel';
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 
 const priorityValidator = v.union(
   v.literal('low'),
@@ -66,7 +65,7 @@ const complaintPayload = v.object({
   status: v.optional(statusValidator)
 });
 
-export const create = mutationGeneric({
+export const create = mutation({
   args: {
     payload: complaintPayload
   },
@@ -110,7 +109,7 @@ export const create = mutationGeneric({
   }
 });
 
-export const list = queryGeneric({
+export const list = query({
   args: {
     limit: v.optional(v.number()),
     cursor: v.optional(v.string()),
@@ -127,18 +126,18 @@ export const list = queryGeneric({
     const limit = normalizeLimit(args.limit);
     const filters = args.filters ?? {};
 
-    let query = ctx.db.query('complaints').withIndex('by_submission_time', (q) => q);
+    let query = ctx.db.query('complaints').withIndex('by_submission_time');
 
     if (filters.priority) {
-      query = query.filter((q) => q.eq('priority', filters.priority));
+      query = query.filter((q) => q.eq(q.field('priority'), filters.priority));
     }
 
     if (filters.source) {
-      query = query.filter((q) => q.eq('source', filters.source));
+      query = query.filter((q) => q.eq(q.field('source'), filters.source));
     }
 
     if (filters.status) {
-      query = query.filter((q) => q.eq('status', filters.status));
+      query = query.filter((q) => q.eq(q.field('status'), filters.status));
     }
 
     return query.order('desc').paginate({
