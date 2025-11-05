@@ -418,7 +418,7 @@ API_BASE=http://localhost:8787
 
 ---
 
-### [ ] **Шаг 6 (опционально): Телеграм‑бот (Python)**
+### [x] **Шаг 6 (опционально): Телеграм-бот (Python)**
 
 **Task:**
 
@@ -493,6 +493,6 @@ API_BASE=http://localhost:8787
 * [x] Шаг 3: Express API (/analyze, /media/upload)
 * [ ] Шаг 4: Convex + /api/submit + /api/analytics/summary
 * [x] Шаг 5: Фронт подключён к реальному API, графики с БД
-* [ ] Шаг 6 (опц.): Телеграм‑бот
+* [x] Шаг 6 (опц.): Телеграм-бот
 
 ---
