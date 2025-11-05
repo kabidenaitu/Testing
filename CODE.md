@@ -331,7 +331,7 @@ API_BASE=http://localhost:8787
 
 ---
 
-### [ ] **Шаг 3: Backend API (Node + Express) — /analyze и /media/upload**
+### [x] **Шаг 3: Backend API (Node + Express) — /analyze и /media/upload**
 
 **Task:**
 
@@ -490,7 +490,7 @@ API_BASE=http://localhost:8787
 
 * [x] Шаг 1: Vite proxy + отключить mock
 * [ ] Шаг 2: LLM‑сервис (FastAPI)
-* [ ] Шаг 3: Express API (/analyze, /media/upload)
+* [x] Шаг 3: Express API (/analyze, /media/upload)
 * [ ] Шаг 4: Convex + /api/submit + /api/analytics/summary
 * [ ] Шаг 5: Фронт подключён к реальному API, графики с БД
 * [ ] Шаг 6 (опц.): Телеграм‑бот
