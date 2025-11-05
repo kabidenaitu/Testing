@@ -38,6 +38,15 @@ if DEFAULT_LANGUAGE not in {"kk", "ru"}:
     DEFAULT_LANGUAGE = "kk"
 
 
+class BackendError(Exception):
+    """Исключение для ошибок при обращении к backend."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
 class AnalyzeResponse(TypedDict, total=False):
     needClarification: bool
     missingSlots: List[str]
@@ -45,6 +54,7 @@ class AnalyzeResponse(TypedDict, total=False):
     tuples: List[Dict[str, Any]]
     aspectsCount: Dict[str, int]
     recommendationKk: str
+    recommendationRu: str
     language: Literal["kk", "ru"]
     extractedFields: Dict[str, List[str]]
     clarifyingQuestionKk: Optional[str]
@@ -97,8 +107,8 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "media_saved": "Медиа файл алынды және сақталды.",
         "media_error": "Файлды сақтау мүмкін болмады. Тағы бір рет байқап көріңіз.",
         "lang_switched": "Интерфейс тілі қазір қазақша.",
-        "lang_prompt": "Қолдау көрсетілетін тілдер: /lang kk немесе /lang ru.",
-        "lang_unknown": "Тілді түсінбедім. kk немесе ru деп көрсетіңіз.",
+        "lang_prompt": "Тілді /lang kk немесе /lang ru арқылы, не төмендегі батырмалармен таңдаңыз.",
+        "lang_unknown": "Тілді түсінбедім. kk немесе ru деп жазыңыз немесе батырмаларды пайдаланыңыз.",
         "cancelled": "Жіберу тоқтатылды. Мәтінді өзгертіп, қайта бастауға болады."
     },
     "ru": {
@@ -134,8 +144,8 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "media_saved": "Медиа-файл получен и сохранён.",
         "media_error": "Не удалось сохранить файл. Повторите попытку.",
         "lang_switched": "Интерфейс теперь на русском языке.",
-        "lang_prompt": "Доступные языки: /lang kk или /lang ru.",
-        "lang_unknown": "Не понял язык. Укажите kk или ru.",
+        "lang_prompt": "Выберите язык командами /lang kk или /lang ru, либо кнопками ниже.",
+        "lang_unknown": "Не понял язык. Укажите kk или ru или нажмите кнопку ниже.",
         "cancelled": "Отправка отменена. Можно изменить текст и начать заново."
     }
 }
@@ -177,6 +187,68 @@ ASPECT_LABELS = {
     }
 }
 
+LANGUAGE_BUTTON_LABELS: Dict[Literal["kk", "ru"], str] = {"kk": "Қазақша", "ru": "Русский"}
+
+
+def build_language_keyboard(current: Literal["kk", "ru"]) -> InlineKeyboardMarkup:
+    buttons = []
+    for code, label in LANGUAGE_BUTTON_LABELS.items():
+        prefix = "✅ " if code == current else ""
+        buttons.append(
+            InlineKeyboardButton(f"{prefix}{label}", callback_data=f"lang:{code}")
+        )
+    return InlineKeyboardMarkup([buttons])
+
+
+def apply_language(session: SessionState, context: ContextTypes.DEFAULT_TYPE, new_lang: Literal["kk", "ru"]) -> None:
+    session.language = new_lang
+    context.user_data["language"] = new_lang
+
+
+def extract_backend_message(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+
+    if isinstance(data, dict):
+        for key in ("message", "detail", "error", "code"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    text = response.text.strip()
+    if text:
+        return text
+    return f"Backend error (HTTP {response.status_code})"
+
+
+async def request_json(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    json_payload: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
+    timeout: Optional[float] = None,
+) -> Any:
+    try:
+        response = await client.request(
+            method,
+            path,
+            json=json_payload,
+            files=files,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        if response.content:
+            return response.json()
+        return {}
+    except httpx.HTTPStatusError as error:
+        message = extract_backend_message(error.response)
+        raise BackendError(message, status=error.response.status_code) from error
+    except httpx.RequestError as error:
+        raise BackendError("Не удалось подключиться к backend API.") from error
+
 
 def get_session(context: ContextTypes.DEFAULT_TYPE) -> SessionState:
     session = context.user_data.get("session")
@@ -205,16 +277,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_session(context)
     reset_session(session)
     if update.message:
+        text = f"{choose_text(session, 'greeting')}\n\n{choose_text(session, 'lang_prompt')}"
         await update.message.reply_text(
-            choose_text(session, "greeting"),
+            text,
             disable_web_page_preview=True,
+            reply_markup=build_language_keyboard(session.language),
         )
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = get_session(context)
+    message = update.message
     if not context.args:
-        await update.message.reply_text(choose_text(session, "lang_prompt"))
+        if message:
+            await message.reply_text(
+                choose_text(session, "lang_prompt"),
+                reply_markup=build_language_keyboard(session.language),
+            )
         return
 
     raw = context.args[0].lower()
@@ -223,12 +302,55 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif raw == "ru":
         new_lang = "ru"
     else:
-        await update.message.reply_text(choose_text(session, "lang_unknown"))
+        if message:
+            await message.reply_text(
+                choose_text(session, "lang_unknown"),
+                reply_markup=build_language_keyboard(session.language),
+            )
         return
 
-    session.language = new_lang
-    context.user_data["language"] = new_lang
-    await update.message.reply_text(choose_text(session, "lang_switched"))
+    if new_lang != session.language:
+        apply_language(session, context, new_lang)
+
+    if message:
+        await message.reply_text(
+            choose_text(session, "lang_switched"),
+            reply_markup=build_language_keyboard(session.language),
+        )
+
+
+async def handle_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+
+    session = get_session(context)
+    data = (query.data or "").split(":")
+    target_raw = data[1] if len(data) > 1 else ""
+
+    if target_raw in {"kk", "kz"}:
+        target: Literal["kk", "ru"] = "kk"
+    elif target_raw == "ru":
+        target = "ru"
+    else:
+        await query.answer()
+        return
+
+    changed = target != session.language
+    if changed:
+        apply_language(session, context, target)
+
+    prompt_text = f"{choose_text(session, 'greeting')}\n\n{choose_text(session, 'lang_prompt')}"
+
+    if query.message:
+        await query.edit_message_text(
+            prompt_text,
+            disable_web_page_preview=True,
+            reply_markup=build_language_keyboard(session.language),
+        )
+
+    feedback = choose_text(session, "lang_switched") if changed else choose_text(session, "lang_prompt")
+    await query.answer(feedback)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -283,11 +405,26 @@ async def run_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
 
     client: httpx.AsyncClient = context.application.bot_data["http_client"]
     try:
-        response = await client.post("/api/analyze", json=payload, timeout=30.0)
-        response.raise_for_status()
-        data = response.json()
+        data = await request_json(
+            client,
+            "POST",
+            "/api/analyze",
+            json_payload=payload,
+            timeout=30.0,
+        )
+    except BackendError as error:
+        logger.warning("Analyze backend error: %s", error.message)
+        await update.message.reply_text(error.message or choose_text(session, "analyze_error"))
+        session.stage = "description"
+        return
     except Exception as error:  # noqa: BLE001
         logger.exception("Analyze request failed: %s", error)
+        await update.message.reply_text(choose_text(session, "analyze_error"))
+        session.stage = "description"
+        return
+
+    if not isinstance(data, dict):
+        logger.error("Analyze response имеет неожиданный формат: %r", data)
         await update.message.reply_text(choose_text(session, "analyze_error"))
         session.stage = "description"
         return
@@ -319,6 +456,7 @@ def normalize_analysis(payload: Dict[str, Any]) -> AnalyzeResponse:
         tuples=payload.get("tuples", []) or [],
         aspectsCount=payload.get("aspects_count", {}) or {},
         recommendationKk=payload.get("recommendation_kk", ""),
+        recommendationRu=payload.get("recommendation_ru", ""),
         language=payload.get("language", "kk"),
         extractedFields={
             "routeNumbers": payload.get("extracted_fields", {}).get("route_numbers", []) or [],
@@ -345,7 +483,7 @@ async def show_preview(update: Update, session: SessionState) -> None:
     priority = PRIORITY_LABELS[session.language][analysis["priority"]]
     aspects = format_aspects(analysis.get("aspectsCount") or {}, session.language)
     tuples = format_tuples(analysis.get("tuples") or [], session.language, session)
-    recommendation = analysis.get("recommendationKk") or "-"
+    recommendation = choose_recommendation_text(analysis, session)
 
     summary = choose_text(session, "preview_summary").format(
         priority=priority,
@@ -380,6 +518,17 @@ async def show_preview(update: Update, session: SessionState) -> None:
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
+
+
+def choose_recommendation_text(analysis: AnalyzeResponse, session: SessionState) -> str:
+    if session.language == "ru":
+        rec_ru = analysis.get("recommendationRu")
+        if isinstance(rec_ru, str) and rec_ru.strip():
+            return rec_ru.strip()
+    rec_kk = analysis.get("recommendationKk")
+    if isinstance(rec_kk, str) and rec_kk.strip():
+        return rec_kk.strip()
+    return "-"
 
 
 def format_aspects(aspects_count: Dict[str, int], language: Literal["kk", "ru"]) -> str:
@@ -464,18 +613,33 @@ async def finalize_submission(
 
     client: httpx.AsyncClient = context.application.bot_data["http_client"]
     try:
-        response = await client.post("/api/submit", json=payload, timeout=30.0)
-        response.raise_for_status()
-        data = response.json()
+        data = await request_json(
+            client,
+            "POST",
+            "/api/submit",
+            json_payload=payload,
+            timeout=30.0,
+        )
+    except BackendError as error:
+        logger.warning("Submit backend error: %s", error.message)
+        await query.edit_message_text(error.message or choose_text(session, "submit_fail"))
+        reset_session(session)
+        return
     except Exception as error:  # noqa: BLE001
         logger.exception("Submit failed: %s", error)
         await query.edit_message_text(choose_text(session, "submit_fail"))
         reset_session(session)
         return
 
+    if not isinstance(data, dict):
+        logger.error("Submit response имеет неожиданный формат: %r", data)
+        await query.edit_message_text(choose_text(session, "submit_fail"))
+        reset_session(session)
+        return
+
     reference = data.get("referenceNumber") or "-"
     await query.edit_message_text(
-        choose_text(session, "submit_ok").format(reference=reference)
+      choose_text(session, "submit_ok").format(reference=reference)
     )
     reset_session(session)
 
@@ -488,6 +652,7 @@ def serialize_analysis(analysis: AnalyzeResponse) -> Dict[str, Any]:
         "tuples": analysis.get("tuples"),
         "aspects_count": analysis.get("aspectsCount"),
         "recommendation_kk": analysis.get("recommendationKk"),
+        "recommendation_ru": analysis.get("recommendationRu"),
         "language": analysis.get("language"),
         "extracted_fields": {
             "route_numbers": analysis.get("extractedFields", {}).get("routeNumbers"),
@@ -538,6 +703,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         media = await upload_media(context, filename, mime_type, bytes(file_bytes))
         session.media.append(media)
         await message.reply_text(choose_text(session, "media_saved"))
+    except BackendError as error:
+        logger.warning("Media upload failed with backend error: %s", error.message)
+        await message.reply_text(error.message or choose_text(session, "media_error"))
     except Exception as error:  # noqa: BLE001
         logger.exception("Media upload failed: %s", error)
         await message.reply_text(choose_text(session, "media_error"))
@@ -551,9 +719,20 @@ async def upload_media(
 ) -> Dict[str, Any]:
     client: httpx.AsyncClient = context.application.bot_data["http_client"]
     files = {"file": (filename, payload, mime_type)}
-    response = await client.post("/api/media/upload", files=files, timeout=60.0)
-    response.raise_for_status()
-    return response.json()
+    try:
+        data = await request_json(
+            client,
+            "POST",
+            "/api/media/upload",
+            files=files,
+            timeout=60.0,
+        )
+    except BackendError as error:
+        logger.warning("Media upload backend error: %s", error.message)
+        raise
+    if not isinstance(data, dict):
+        raise BackendError("Некорректный ответ сервера при загрузке медиа.")
+    return data
 
 
 async def post_init(application: Application) -> None:
@@ -582,6 +761,7 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("lang", cmd_lang))
+    application.add_handler(CallbackQueryHandler(handle_language_callback, pattern="^lang:"))
     application.add_handler(CallbackQueryHandler(handle_decision, pattern="^decision:"))
     application.add_handler(
         MessageHandler(
