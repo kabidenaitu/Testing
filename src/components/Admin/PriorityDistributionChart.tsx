@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import * as echarts from 'echarts';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { Priority } from '@/types/complaint';
+import { getCssHslColor } from '@/lib/chartColors';
 
 interface PriorityPoint {
   priority: Priority;
@@ -35,6 +36,10 @@ export const PriorityDistributionChart = ({ data = [] }: Props) => {
 
     const chart = echarts.init(chartRef.current);
 
+    const axisLineColor = getCssHslColor('--muted-foreground', 0.3);
+    const axisLabelColor = getCssHslColor('--foreground');
+    const splitLineColor = getCssHslColor('--muted-foreground', 0.1);
+
     const option = {
       tooltip: {
         trigger: 'item',
@@ -43,15 +48,15 @@ export const PriorityDistributionChart = ({ data = [] }: Props) => {
       },
       xAxis: {
         type: 'value',
-        axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))' },
-        splitLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.1)' } }
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisLabel: { color: axisLabelColor },
+        splitLine: { lineStyle: { color: splitLineColor } }
       },
       yAxis: {
         type: 'category',
         data: orderedData.map((item) => t(`priority.${item.priority}`)),
-        axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))' }
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisLabel: { color: axisLabelColor }
       },
       series: [
         {
@@ -64,7 +69,7 @@ export const PriorityDistributionChart = ({ data = [] }: Props) => {
           label: {
             show: true,
             position: 'right',
-            color: 'hsl(var(--foreground))'
+            color: axisLabelColor
           },
           animationDuration: 600
         }
@@ -97,13 +102,13 @@ export const PriorityDistributionChart = ({ data = [] }: Props) => {
 function colorForPriority(priority: Priority) {
   switch (priority) {
     case 'critical':
-      return 'hsl(var(--priority-critical))';
+      return getCssHslColor('--priority-critical');
     case 'high':
-      return 'hsl(var(--priority-high))';
+      return getCssHslColor('--priority-high');
     case 'medium':
-      return 'hsl(var(--priority-medium))';
+      return getCssHslColor('--priority-medium');
     case 'low':
     default:
-      return 'hsl(var(--priority-low))';
+      return getCssHslColor('--priority-low');
   }
 }

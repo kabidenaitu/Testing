@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { getCssHslColor } from '@/lib/chartColors';
 
 interface AspectData {
   aspect: string;
@@ -23,6 +24,14 @@ export const AspectFrequencyChart = ({ data = [] }: Props) => {
     const chart = echarts.init(chartRef.current);
     const seriesData = data.slice(0, 10);
 
+    const axisLineColor = getCssHslColor('--muted-foreground', 0.3);
+    const axisLabelColor = getCssHslColor('--foreground');
+    const splitLineColor = getCssHslColor('--muted-foreground', 0.1);
+    const barGradient = new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+      { offset: 0, color: getCssHslColor('--accent') },
+      { offset: 1, color: getCssHslColor('--primary') }
+    ]);
+
     const option = {
       tooltip: {
         trigger: 'axis',
@@ -36,25 +45,22 @@ export const AspectFrequencyChart = ({ data = [] }: Props) => {
       },
       xAxis: {
         type: 'value',
-        axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))' },
-        splitLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.1)' } }
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisLabel: { color: axisLabelColor },
+        splitLine: { lineStyle: { color: splitLineColor } }
       },
       yAxis: {
         type: 'category',
         data: seriesData.map((item) => item.aspect),
-        axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))', fontSize: 11 }
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisLabel: { color: axisLabelColor, fontSize: 11 }
       },
       series: [
         {
           data: seriesData.map((item) => item.count),
           type: 'bar',
           itemStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
-              { offset: 0, color: 'hsl(var(--accent))' },
-              { offset: 1, color: 'hsl(var(--primary))' }
-            ]),
+            color: barGradient,
             borderRadius: [0, 8, 8, 0]
           },
           animationDuration: 600

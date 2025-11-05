@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { getCssHslColor } from '@/lib/chartColors';
 
 interface RouteData {
   route: string;
@@ -24,6 +25,14 @@ export const RouteProblemsChart = ({ data = [] }: Props) => {
 
     const seriesData = data.slice(0, 10);
 
+    const axisLineColor = getCssHslColor('--muted-foreground', 0.3);
+    const axisLabelColor = getCssHslColor('--foreground');
+    const splitLineColor = getCssHslColor('--muted-foreground', 0.1);
+    const barGradient = new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: getCssHslColor('--priority-high') },
+      { offset: 1, color: getCssHslColor('--priority-medium') }
+    ]);
+
     const option = {
       tooltip: {
         trigger: 'axis',
@@ -38,24 +47,21 @@ export const RouteProblemsChart = ({ data = [] }: Props) => {
       xAxis: {
         type: 'category',
         data: seriesData.map((item) => item.route),
-        axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))' }
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisLabel: { color: axisLabelColor }
       },
       yAxis: {
         type: 'value',
-        axisLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.3)' } },
-        axisLabel: { color: 'hsl(var(--foreground))' },
-        splitLine: { lineStyle: { color: 'hsl(var(--muted-foreground) / 0.1)' } }
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisLabel: { color: axisLabelColor },
+        splitLine: { lineStyle: { color: splitLineColor } }
       },
       series: [
         {
           data: seriesData.map((item) => item.count),
           type: 'bar',
           itemStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'hsl(var(--priority-high))' },
-              { offset: 1, color: 'hsl(var(--priority-medium))' }
-            ]),
+            color: barGradient,
             borderRadius: [8, 8, 0, 0]
           },
           animationDuration: 600

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { getCssHslColor } from '@/lib/chartColors';
 
 interface HeatmapData {
   day: number;
@@ -34,6 +35,14 @@ export const HeatmapChart = ({ data = [] }: Props) => {
     const chartData = normalized.map((item) => [item.hour, item.day, item.count]);
     const maxCount = normalized.length > 0 ? Math.max(...normalized.map((d) => d.count)) : 1;
 
+    const axisLabelColor = getCssHslColor('--foreground');
+    const visualColors = [
+      getCssHslColor('--priority-low'),
+      getCssHslColor('--priority-medium'),
+      getCssHslColor('--priority-high'),
+      getCssHslColor('--priority-critical')
+    ];
+
     const option = {
       tooltip: {
         position: 'top',
@@ -53,7 +62,7 @@ export const HeatmapChart = ({ data = [] }: Props) => {
         data: hours,
         splitArea: { show: true },
         axisLabel: { 
-          color: 'hsl(var(--foreground))',
+          color: axisLabelColor,
           interval: 2,
           fontSize: 10,
         },
@@ -63,7 +72,7 @@ export const HeatmapChart = ({ data = [] }: Props) => {
         type: 'category',
         data: days,
         splitArea: { show: true },
-        axisLabel: { color: 'hsl(var(--foreground))' },
+        axisLabel: { color: axisLabelColor },
         axisLine: { show: false },
       },
       visualMap: {
@@ -73,14 +82,9 @@ export const HeatmapChart = ({ data = [] }: Props) => {
         orient: 'horizontal',
         left: 'center',
         bottom: '0%',
-        textStyle: { color: 'hsl(var(--foreground))' },
+        textStyle: { color: axisLabelColor },
         inRange: {
-          color: [
-            'hsl(var(--priority-low))',
-            'hsl(var(--priority-medium))',
-            'hsl(var(--priority-high))',
-            'hsl(var(--priority-critical))',
-          ],
+          color: visualColors,
         },
       },
       series: [
