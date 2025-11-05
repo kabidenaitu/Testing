@@ -309,7 +309,7 @@ API_BASE=http://localhost:8787
 
 ---
 
-### [ ] **Шаг 2: LLM‑сервис (Python FastAPI + KazLLM)**
+### [x] **Шаг 2: LLM‑сервис (Python FastAPI + KazLLM)**
 
 **Task:**
 

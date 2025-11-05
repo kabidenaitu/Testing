@@ -1,0 +1,7 @@
+fastapi>=0.110,<0.111
+uvicorn[standard]>=0.29,<0.30
+transformers>=4.39.0
+accelerate>=0.29.0
+bitsandbytes>=0.43.0
+pydantic>=2.7.0
+torch>=2.1.0
