@@ -1,8 +1,9 @@
 import json
 import logging
 import os
+import re
 from functools import lru_cache
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 import torch
 from fastapi import FastAPI, HTTPException
@@ -21,6 +22,7 @@ logging.basicConfig(level=logging.INFO)
 
 DEFAULT_MODEL_ID = "issai/LLama-3.1-KazLLM-1.0-8B"
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "400"))
+LLM_DISABLED = os.getenv("LLM_DISABLED", "1").lower() in {"1", "true", "yes"}
 
 
 class AnalyzeRequest(BaseModel):
@@ -212,6 +214,10 @@ def _extract_json(payload: str) -> Dict[str, Any]:
 
 
 def _call_model(payload: AnalyzeRequest) -> AnalyzeResponse:
+    if LLM_DISABLED:
+        logger.info("LLM отключён (LLM_DISABLED=1). Используем резервный анализатор.")
+        return _fallback_analysis(payload)
+
     messages = _build_messages(payload)
     raw_output = _generate_response(messages)
 
@@ -237,11 +243,169 @@ def _call_model(payload: AnalyzeRequest) -> AnalyzeResponse:
             data = _extract_json(retry_output)
             return AnalyzeResponse.model_validate(data)
         except Exception as second_error:  # noqa: B902
-            logger.error("Повторный ответ модели снова невалиден: %s", second_error)
-            raise HTTPException(
-                status_code=500,
-                detail="LLM вернул невалидный JSON дважды",
-            ) from second_error
+            logger.error(
+                "Повторный ответ модели снова невалиден: %s. "
+                "Переходим на резервный анализатор.",
+                second_error,
+            )
+            return _fallback_analysis(payload)
+
+
+def _fallback_analysis(payload: AnalyzeRequest) -> AnalyzeResponse:
+    text = payload.description.strip()
+    lower_text = text.lower()
+
+    language = _detect_language(lower_text)
+    priority = _detect_priority(lower_text)
+    aspects, aspects_count = _detect_aspects(lower_text)
+
+    route_numbers = _collect_routes(payload, lower_text)
+    tuples: List[ComplaintTuple] = []
+    if route_numbers:
+        tuples.append(
+            ComplaintTuple(
+                objects=[TupleObject(type="route", value=route) for route in route_numbers],
+                time=payload.submission_time_iso
+                or payload.known_fields.get("reported_time")  # type: ignore[arg-type]
+                or "unspecified",
+                place=None,
+                aspects=aspects,
+            )
+        )
+
+    extracted_fields = ExtractedFields(
+        route_numbers=route_numbers,
+        bus_plates=_collect_bus_plates(payload, lower_text),
+        places=_collect_places(payload, lower_text),
+    )
+
+    recommendation = _build_recommendation(priority, language)
+
+    return AnalyzeResponse(
+        need_clarification=False,
+        missing_slots=[],
+        priority=priority,
+        tuples=tuples,
+        aspects_count=aspects_count,
+        recommendation_kk=recommendation if language == "kk" else "",
+        language=language,
+        extracted_fields=extracted_fields,
+        clarifying_question_kk=None,
+        clarifying_question_ru=None,
+    )
+
+
+def _detect_language(lower_text: str) -> Literal["kk", "ru"]:
+    kazakh_letters = {"ә", "ө", "ү", "ұ", "қ", "ғ", "ң", "һ", "і"}
+    return "kk" if any(letter in lower_text for letter in kazakh_letters) else "ru"
+
+
+def _detect_priority(lower_text: str) -> Literal["low", "medium", "high", "critical"]:
+    critical_keywords = ["авар", "опас", "пожар", "дтп", "угроза", "қатты соқты"]
+    if any(word in lower_text for word in critical_keywords):
+        return "critical"
+
+    high_keywords = ["мас", "драка", "не работает тормоз", "не остановился", "қатер"]
+    if any(word in lower_text for word in high_keywords):
+        return "high"
+
+    medium_keywords = ["опозд", "задерж", "жарық жоқ", "гряз", "қатты суық", "кондиц"]
+    if any(word in lower_text for word in medium_keywords):
+        return "medium"
+
+    return "low"
+
+
+def _detect_aspects(lower_text: str) -> Tuple[List[str], AspectsCount]:
+    aspects_selected: List[str] = []
+
+    def check(words: Iterable[str]) -> bool:
+        return any(word in lower_text for word in words)
+
+    punctuality = int(check(["опозд", "опазд", "задерж", "кешікті"]))
+    if punctuality:
+        aspects_selected.append("punctuality")
+
+    crowding = int(check(["переполн", "толп", "адам көп"]))
+    if crowding:
+        aspects_selected.append("crowding")
+
+    safety = int(check(["опас", "драка", "қорқынышты", "авар"]))
+    if safety:
+        aspects_selected.append("safety")
+
+    staff = int(check(["водител", "кондуктор", "жүргізуші", "хам"]))
+    if staff:
+        aspects_selected.append("staff")
+
+    condition = int(check(["гряз", "грязн", "сын", "жарамсыз", "жыртылған", "холод", "ыстық"]))
+    if condition:
+        aspects_selected.append("condition")
+
+    payment = int(check(["оплат", "валид", "касса", "төле"]))
+    if payment:
+        aspects_selected.append("payment")
+
+    if not aspects_selected:
+        aspects_selected.append("other")
+        other = 1
+    else:
+        other = 0
+
+    aspects_count = AspectsCount(
+        punctuality=punctuality,
+        crowding=crowding,
+        safety=safety,
+        staff=staff,
+        condition=condition,
+        payment=payment,
+        other=other,
+    )
+    return aspects_selected, aspects_count
+
+
+def _collect_routes(payload: AnalyzeRequest, lower_text: str) -> List[str]:
+    routes = set()
+    routes.update(str(value) for value in payload.known_fields.get("route_numbers", []))
+    for match in re.findall(r"\b\d{1,3}\b", lower_text):
+        routes.add(match)
+    return sorted(routes)
+
+
+def _collect_bus_plates(payload: AnalyzeRequest, lower_text: str) -> List[str]:
+    plates = set()
+    plates.update(str(value) for value in payload.known_fields.get("bus_plates", []))
+    for match in re.findall(r"[a-zа-я]{1,2}\d{3}[a-zа-я]{2}", lower_text):
+        plates.add(match.upper())
+    return sorted(plates)
+
+
+def _collect_places(payload: AnalyzeRequest, lower_text: str) -> List[str]:
+    places = set()
+    places.update(str(value) for value in payload.known_fields.get("places", []))
+    stop_keywords = ["остановк", "аялдама", "станция", "вокзал"]
+    for word in stop_keywords:
+        if word in lower_text:
+            places.add(word)
+    return sorted(places)
+
+
+def _build_recommendation(priority: Literal["low", "medium", "high", "critical"], language: str) -> str:
+    if language == "kk":
+        mapping = {
+            "critical": "Жауапты қызметтерге дереу хабарласып, қауіпсіздікті қамтамасыз ету қажет.",
+            "high": "Маршрут операторы қадағалауды күшейтіп, жүргізушіге ескерту жасауы тиіс.",
+            "medium": "Оқиғаға талдау жүргізіп, уақытылы қызмет көрсету үшін қосымша бақылау орнатыңыз.",
+            "low": "Өтініш журналға жазылды, қайталанса — маршрут операторы қарастырады.",
+        }
+    else:
+        mapping = {
+            "critical": "Нужно срочно передать информацию экстренным службам и обеспечить безопасность.",
+            "high": "Рекомендуется провести проверку маршрута и уведомить водителя о нарушении.",
+            "medium": "Следует усилить контроль за расписанием и условиями поездки на данном маршруте.",
+            "low": "Обращение зафиксировано, при повторении ситуация будет передана оператору маршрута.",
+        }
+    return mapping[priority]
 
 
 def _dump_response(response: AnalyzeResponse) -> Dict[str, Any]:
