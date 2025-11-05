@@ -356,7 +356,7 @@ API_BASE=http://localhost:8787
 
 ---
 
-### [ ] **Шаг 4: Convex (local dev) — схема и функции + /api/submit, /api/analytics/summary**
+### [x] **Шаг 4: Convex (local dev) — схема и функции + /api/submit, /api/analytics/summary**
 
 **Task:**
 

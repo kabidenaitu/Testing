@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { ConvexHttpClient } from 'convex/browser';
+import { anyApi } from 'convex/server';
 
 type MediaCategory = 'image' | 'video' | 'audio';
 
@@ -21,7 +23,14 @@ const envSchema = z.object({
   STORAGE_DIR: z.string().default('./storage/media'),
   MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   MAX_VIDEO_BYTES: z.coerce.number().int().positive().default(30 * 1024 * 1024),
-  MAX_AUDIO_BYTES: z.coerce.number().int().positive().default(15 * 1024 * 1024)
+  MAX_AUDIO_BYTES: z.coerce.number().int().positive().default(15 * 1024 * 1024),
+  CONVEX_URL: z
+    .string()
+    .optional()
+    .transform((value) => {
+      const trimmed = value?.trim() ?? '';
+      return trimmed.length > 0 ? trimmed : null;
+    })
 });
 
 const env = envSchema.parse({
@@ -30,7 +39,8 @@ const env = envSchema.parse({
   STORAGE_DIR: process.env.STORAGE_DIR,
   MAX_IMAGE_BYTES: process.env.MAX_IMAGE_BYTES,
   MAX_VIDEO_BYTES: process.env.MAX_VIDEO_BYTES,
-  MAX_AUDIO_BYTES: process.env.MAX_AUDIO_BYTES
+  MAX_AUDIO_BYTES: process.env.MAX_AUDIO_BYTES,
+  CONVEX_URL: process.env.CONVEX_URL
 });
 
 const llmBaseUrl = env.LLM_URL.endsWith('/') ? env.LLM_URL : `${env.LLM_URL}/`;
@@ -96,6 +106,68 @@ const app = express();
 app.use(cors());
 // Текстовые payload'ы от фронтенда небольшие, поэтому 1 МБ достаточно.
 app.use(express.json({ limit: '1mb' }));
+
+const priorityValues = ['low', 'medium', 'high', 'critical'] as const;
+const statusValues = ['new', 'in_review', 'forwarded', 'closed'] as const;
+const sourceValues = ['web', 'telegram'] as const;
+const tuplePlaceKinds = ['stop', 'street', 'crossroad'] as const;
+
+const tupleObjectSchema = z.object({
+  type: z.enum(['route', 'bus_plate']),
+  value: z.string().min(1, 'Значение не может быть пустым.')
+});
+
+const tupleSchema = z.object({
+  objects: z.array(tupleObjectSchema).default([]),
+  time: z.string().min(1, 'Время обязательно.'),
+  place: z.object({
+    kind: z.enum(tuplePlaceKinds, { required_error: 'Тип местоположения обязателен.' }),
+    value: z.string().min(1, 'Название места обязательно.')
+  }),
+  aspects: z.array(z.string().min(1)).default([])
+});
+
+const mediaSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(['image', 'video', 'audio']),
+  path: z.string().min(1),
+  size: z.number().nonnegative(),
+  mime: z.string().min(1),
+  width: z.number().nonnegative().optional(),
+  height: z.number().nonnegative().optional(),
+  durationSec: z.number().nonnegative().optional(),
+  originalName: z.string().optional(),
+  uploadedAt: z.string().optional()
+});
+
+const contactSchema = z
+  .object({
+    name: z.string().optional(),
+    phone: z.string().optional(),
+    email: z.string().optional()
+  })
+  .strict()
+  .optional();
+
+const submitPayloadSchema = z
+  .object({
+    description: z.string().min(1),
+    priority: z.enum(priorityValues),
+    tuples: z.array(tupleSchema).optional().default([]),
+    analysis: z.unknown().nullable().optional(),
+    media: z.array(mediaSchema).optional().default([]),
+    isAnonymous: z.boolean(),
+    contact: contactSchema,
+    source: z.enum(sourceValues).default('web'),
+    submissionTime: z.string().optional(),
+    reportedTime: z.string().optional(),
+    status: z.enum(statusValues).optional()
+  })
+  .strict();
+
+const convexClient = env.CONVEX_URL
+  ? new ConvexHttpClient(env.CONVEX_URL, { skipConvexDeploymentUrlCheck: true })
+  : null;
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -184,6 +256,66 @@ app.post(
   }
 );
 
+app.post('/api/submit', async (req, res, next) => {
+  try {
+    const client = getConvexClientOrRespond(res);
+    if (!client) {
+      return;
+    }
+
+    const payload = submitPayloadSchema.parse(req.body ?? {});
+    const submissionTime = payload.submissionTime ?? new Date().toISOString();
+    const reportedTime = payload.reportedTime ?? 'submission_time';
+
+    const result = await client.mutation(anyApi.complaints.create, {
+      payload: {
+        description: payload.description,
+        priority: payload.priority,
+        tuples: payload.tuples ?? [],
+        analysis: payload.analysis ?? null,
+        media: payload.media ?? [],
+        isAnonymous: payload.isAnonymous,
+        contact: prepareContact(payload.contact),
+        source: payload.source,
+        submissionTime,
+        reportedTime,
+        status: payload.status
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      id: result.id,
+      referenceNumber: result.referenceNumber
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        error: 'INVALID_PAYLOAD',
+        message: 'Некорректный формат тела запроса.',
+        details: error.flatten()
+      });
+      return;
+    }
+
+    next(error);
+  }
+});
+
+app.get('/api/analytics/summary', async (_req, res, next) => {
+  try {
+    const client = getConvexClientOrRespond(res);
+    if (!client) {
+      return;
+    }
+
+    const summary = await client.query(anyApi.analytics.summary, {});
+    res.json(summary);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use(
   (
     error: unknown,
@@ -251,6 +383,37 @@ function toProjectRelativePath(targetPath: string): string {
   return relative.split(path.sep).join('/');
 }
 
+function getConvexClientOrRespond(res: Response): ConvexHttpClient | null {
+  if (!convexClient) {
+    res.status(500).json({
+      error: 'CONVEX_NOT_CONFIGURED',
+      message: 'Переменная окружения CONVEX_URL не задана или пустая. Укажите URL dev-деплоймента Convex.'
+    });
+    return null;
+  }
+
+  return convexClient;
+}
+
+function prepareContact(contact: z.infer<typeof contactSchema>) {
+  if (!contact) {
+    return undefined;
+  }
+
+  const normalized: Record<string, string> = {};
+  if (contact.name?.trim()) {
+    normalized.name = contact.name.trim();
+  }
+  if (contact.phone?.trim()) {
+    normalized.phone = contact.phone.trim();
+  }
+  if (contact.email?.trim()) {
+    normalized.email = contact.email.trim();
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 interface UploadResponse {
   id: string;
   type: MediaCategory;
@@ -261,4 +424,5 @@ interface UploadResponse {
   uploadedAt: string;
   width?: number;
   height?: number;
+  durationSec?: number;
 }
