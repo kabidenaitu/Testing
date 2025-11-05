@@ -95,7 +95,7 @@ app = FastAPI(title="KazLLM Complaint Analyzer", version="1.0.0")
 @lru_cache(maxsize=1)
 def _load_tokenizer() -> AutoTokenizer:
     model_id = os.getenv("MODEL_ID", DEFAULT_MODEL_ID)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
@@ -120,7 +120,7 @@ def _load_model() -> AutoModelForCausalLM:
         kwargs["torch_dtype"] = dtype
         logger.info("Загружаем модель %s в стандартном режиме", model_id)
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True, **kwargs)
     return model
 
 
