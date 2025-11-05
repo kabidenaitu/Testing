@@ -599,17 +599,20 @@ async def finalize_submission(
         await query.edit_message_text(choose_text(session, "analyze_error"))
         return
 
-    payload = {
+    payload: Dict[str, Any] = {
         "description": session.description,
         "priority": analysis["priority"],
         "tuples": analysis.get("tuples") or [],
         "analysis": serialize_analysis(analysis),
         "media": session.media,
         "isAnonymous": True,
-        "contact": None,
         "source": "telegram",
         "submissionTime": session.submission_time
     }
+
+    contact_data = session.known_fields.get("contact") if session.known_fields else None
+    if isinstance(contact_data, dict) and any(contact_data.values()):
+        payload["contact"] = contact_data
 
     client: httpx.AsyncClient = context.application.bot_data["http_client"]
     try:
