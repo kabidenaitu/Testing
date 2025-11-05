@@ -38,6 +38,30 @@ if DEFAULT_LANGUAGE not in {"kk", "ru"}:
     DEFAULT_LANGUAGE = "kk"
 
 
+def _read_timeout(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Переменная %s=%r некорректна, используем %.0f", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Переменная %s должна быть положительной, используем %.0f", name, default)
+        return default
+    return value
+
+
+API_TIMEOUT_SECONDS = _read_timeout("API_TIMEOUT_SECONDS", 30.0)
+ANALYZE_TIMEOUT_SECONDS = _read_timeout(
+    "ANALYZE_TIMEOUT_SECONDS",
+    max(API_TIMEOUT_SECONDS, 120.0),
+)
+MEDIA_TIMEOUT_SECONDS = _read_timeout("MEDIA_TIMEOUT_SECONDS", 90.0)
+SUBMIT_TIMEOUT_SECONDS = _read_timeout("SUBMIT_TIMEOUT_SECONDS", max(API_TIMEOUT_SECONDS, 45.0))
+
+
 class BackendError(Exception):
     """Исключение для ошибок при обращении к backend."""
 
@@ -243,6 +267,8 @@ async def request_json(
         if response.content:
             return response.json()
         return {}
+    except httpx.TimeoutException as error:
+        raise BackendError("Превышено время ожидания ответа backend API.") from error
     except httpx.HTTPStatusError as error:
         message = extract_backend_message(error.response)
         raise BackendError(message, status=error.response.status_code) from error
@@ -410,7 +436,7 @@ async def run_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
             "POST",
             "/api/analyze",
             json_payload=payload,
-            timeout=30.0,
+            timeout=ANALYZE_TIMEOUT_SECONDS,
         )
     except BackendError as error:
         logger.warning("Analyze backend error: %s", error.message)
@@ -551,28 +577,74 @@ def format_tuples(
     if not tuples:
         return choose_text(session, "no_tuples")
 
+    from html import escape  # local import to avoid global dependency if HTML not used
+
+    labels = {
+        "ru": {
+            "route": "Маршрут",
+            "bus_plate": "Госномер",
+            "time": "Время",
+            "aspects": "Аспекты",
+            "place": {
+                "stop": "Остановка",
+                "street": "Улица",
+                "crossroad": "Перекрёсток",
+            },
+        },
+        "kk": {
+            "route": "Бағыт",
+            "bus_plate": "Мемнөмір",
+            "time": "Уақыты",
+            "aspects": "Аспектілер",
+            "place": {
+                "stop": "Аялдама",
+                "street": "Көше",
+                "crossroad": "Қиылыс",
+            },
+        },
+    }
+
+    lang_labels = labels[language]
+    place_labels = lang_labels["place"]
+
     lines: List[str] = []
     for idx, item in enumerate(tuples, start=1):
-        parts: List[str] = []
         objects = item.get("objects") or []
-        if objects:
-            object_values = ", ".join(
-                f"{obj.get('type')}: {obj.get('value')}" for obj in objects
-            )
-            parts.append(object_values)
-        place = item.get("place")
-        if place:
-            parts.append(f"{place.get('kind')}: {place.get('value')}")
-        time_value = item.get("time")
-        if time_value:
-            parts.append(f"уақыты/time: {time_value}")
+        routes = [
+            escape(str(obj.get("value", "")).strip())
+            for obj in objects
+            if obj.get("type") == "route" and str(obj.get("value", "")).strip()
+        ]
+        plates = [
+            escape(str(obj.get("value", "")).strip())
+            for obj in objects
+            if obj.get("type") == "bus_plate" and str(obj.get("value", "")).strip()
+        ]
+
+        place = item.get("place") or {}
+        place_kind = place.get("kind")
+        place_value = escape(str(place.get("value", "")).strip())
+
+        parts: List[str] = []
+        if routes:
+            parts.append(f"<b>{lang_labels['route']}:</b> {', '.join(routes)}")
+        if plates:
+            parts.append(f"<b>{lang_labels['bus_plate']}:</b> {', '.join(plates)}")
+        if place_kind in place_labels and place_value:
+            parts.append(f"<b>{place_labels[place_kind]}:</b> {place_value}")
+
+        time_value = escape(str(item.get("time", "")).strip())
+        if time_value and time_value.lower() != "unspecified":
+            parts.append(f"<b>{lang_labels['time']}:</b> {time_value}")
+
         aspects = item.get("aspects") or []
         if aspects:
             label_map = ASPECT_LABELS[language]
             mapped = ", ".join(label_map.get(a, a) for a in aspects)
-            parts.append(mapped)
-        joined = "; ".join(parts)
-        lines.append(f"{idx}. {joined}" if joined else f"{idx}. —")
+            parts.append(f"<b>{lang_labels['aspects']}:</b> {escape(mapped)}")
+
+        content = "; ".join(parts) if parts else "—"
+        lines.append(f"{idx}. {content}")
     return "\n".join(lines)
 
 
@@ -621,7 +693,7 @@ async def finalize_submission(
             "POST",
             "/api/submit",
             json_payload=payload,
-            timeout=30.0,
+            timeout=SUBMIT_TIMEOUT_SECONDS,
         )
     except BackendError as error:
         logger.warning("Submit backend error: %s", error.message)
@@ -728,7 +800,7 @@ async def upload_media(
             "POST",
             "/api/media/upload",
             files=files,
-            timeout=60.0,
+            timeout=MEDIA_TIMEOUT_SECONDS,
         )
     except BackendError as error:
         logger.warning("Media upload backend error: %s", error.message)
@@ -739,7 +811,10 @@ async def upload_media(
 
 
 async def post_init(application: Application) -> None:
-    application.bot_data["http_client"] = httpx.AsyncClient(base_url=API_BASE, timeout=30.0)
+    application.bot_data["http_client"] = httpx.AsyncClient(
+        base_url=API_BASE,
+        timeout=API_TIMEOUT_SECONDS,
+    )
     logger.info("HTTP клиент готов (%s)", API_BASE)
 
 

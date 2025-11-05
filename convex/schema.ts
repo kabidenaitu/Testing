@@ -43,6 +43,10 @@ const priorityLiteral = v.union(
 );
 
 const statusLiteral = v.union(
+  v.literal('pending'),
+  v.literal('approved'),
+  v.literal('resolved'),
+  v.literal('rejected'),
   v.literal('new'),
   v.literal('in_review'),
   v.literal('forwarded'),
@@ -64,6 +68,8 @@ export default defineSchema({
     isAnonymous: v.boolean(),
     contact: v.optional(contactInfo),
     status: statusLiteral,
+    adminComment: v.optional(v.string()),
+    statusUpdatedAt: v.optional(v.string()),
     referenceNumber: v.string(),
     createdAt: v.string(),
     updatedAt: v.string()
@@ -71,7 +77,8 @@ export default defineSchema({
     .index('by_priority', ['priority'])
     .index('by_source', ['source'])
     .index('by_status', ['status'])
-    .index('by_submission_time', ['submissionTime']),
+    .index('by_submission_time', ['submissionTime'])
+    .index('by_reference', ['referenceNumber']),
   dict_values: defineTable({
     kind: v.union(
       v.literal('route'),

@@ -1,6 +1,3 @@
 {
-  "project": "ai-agent-transit-complaints",
-  "team": "local-dev",
-  "prodUrl": "",
   "functions": "convex"
 }

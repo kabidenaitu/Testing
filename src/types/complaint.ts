@@ -1,6 +1,6 @@
 export type Priority = 'low' | 'medium' | 'high' | 'critical';
 export type ComplaintSource = 'web' | 'telegram';
-export type ComplaintStatus = 'new' | 'in_review' | 'forwarded' | 'closed';
+export type ComplaintStatus = 'pending' | 'approved' | 'resolved' | 'rejected';
 export type TupleObjectType = 'route' | 'bus_plate';
 export type TuplePlaceKind = 'stop' | 'street' | 'crossroad';
 export type ComplaintAspect =
@@ -81,6 +81,7 @@ export interface AnalyzeResponse {
   tuples: ComplaintTuple[];
   aspectsCount: AspectsCount;
   recommendationKk: string;
+  recommendationRu: string;
   language: ClarificationLanguage;
   extractedFields: ExtractedFields;
   clarifyingQuestionKk?: string;
@@ -105,6 +106,7 @@ export interface ComplaintDraft {
   submissionTime?: string;
   reportedTime?: string;
   status?: ComplaintStatus;
+  adminComment?: string;
 }
 
 export interface ComplaintPreview {
@@ -135,4 +137,39 @@ export interface AnalyticsSummary {
   priorityDistribution: Record<Priority, number>;
   aspectFrequency: Array<{ aspect: string; count: number }>;
   timeOfDayHeatmap: Array<{ day: number; hour: number; count: number }>;
+}
+
+export interface ComplaintRecord {
+  id: string;
+  referenceNumber: string | null;
+  priority: Priority | null;
+  status: ComplaintStatus | null;
+  source: ComplaintSource | null;
+  submissionTime: string | null;
+  reportedTime: string | null;
+  rawText: string | null;
+  tuples: ComplaintTuple[];
+  analysis: unknown;
+  media: UploadedMedia[];
+  isAnonymous: boolean | null;
+  contact?: ComplaintContact | null;
+  adminComment: string | null;
+  statusUpdatedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ComplaintsListResponse {
+  items: ComplaintRecord[];
+  nextCursor: string | null;
+}
+
+export interface ComplaintStatusInfo {
+  referenceNumber: string;
+  status: ComplaintStatus | null;
+  priority: Priority | null;
+  submissionTime: string | null;
+  reportedTime: string | null;
+  statusUpdatedAt: string | null;
+  adminComment: string | null;
 }

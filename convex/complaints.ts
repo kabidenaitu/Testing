@@ -5,7 +5,7 @@ import {
   type MutationCtx,
   type QueryCtx
 } from './_generated/server';
-import type { FilterBuilder, IndexRangeBuilder } from 'convex/server';
+import type { FilterBuilder } from 'convex/server';
 
 const priorityValidator = v.union(
   v.literal('low'),
@@ -14,7 +14,15 @@ const priorityValidator = v.union(
   v.literal('critical')
 );
 
+const currentStatusValidator = v.union(
+  v.literal('pending'),
+  v.literal('approved'),
+  v.literal('resolved'),
+  v.literal('rejected')
+);
+
 const statusValidator = v.union(
+  currentStatusValidator,
   v.literal('new'),
   v.literal('in_review'),
   v.literal('forwarded'),
@@ -68,7 +76,8 @@ const complaintPayload = v.object({
   source: sourceValidator,
   submissionTime: v.optional(v.string()),
   reportedTime: v.optional(v.string()),
-  status: v.optional(statusValidator)
+  status: v.optional(currentStatusValidator),
+  adminComment: v.optional(v.string())
 });
 
 export const create = mutation({
@@ -80,9 +89,10 @@ export const create = mutation({
     const nowIso = new Date().toISOString();
     const submissionTime = payload.submissionTime ?? nowIso;
     const reportedTime = payload.reportedTime ?? 'submission_time';
-    const status = payload.status ?? 'new';
+    const status = payload.status ?? 'pending';
     const tuples = payload.tuples ?? [];
     const media = payload.media ?? [];
+    const adminComment = payload.adminComment?.trim();
     const referenceNumber = buildReferenceNumber(nowIso);
 
     const insertedId = await ctx.db.insert('complaints', {
@@ -97,6 +107,8 @@ export const create = mutation({
       isAnonymous: payload.isAnonymous,
       contact: payload.contact,
       status,
+      adminComment: adminComment && adminComment.length > 0 ? adminComment : undefined,
+      statusUpdatedAt: nowIso,
       referenceNumber,
       createdAt: nowIso,
       updatedAt: nowIso
@@ -123,7 +135,7 @@ export const list = query({
       v.object({
         priority: v.optional(priorityValidator),
         source: v.optional(sourceValidator),
-        status: v.optional(statusValidator),
+        status: v.optional(currentStatusValidator),
         search: v.optional(v.string())
       })
     )
@@ -156,6 +168,59 @@ export const list = query({
       numItems: limit,
       cursor: args.cursor ?? null
     });
+  }
+});
+
+export const updateStatus = mutation({
+  args: {
+    id: v.id('complaints'),
+    status: currentStatusValidator,
+    adminComment: v.optional(v.union(v.string(), v.null()))
+  },
+  handler: async (ctx: MutationCtx, args) => {
+    const complaint = await ctx.db.get(args.id);
+    if (!complaint) {
+      throw new Error('NOT_FOUND');
+    }
+
+    const nowIso = new Date().toISOString();
+    const adminComment = typeof args.adminComment === 'string' ? args.adminComment.trim() : null;
+
+    await ctx.db.patch(args.id, {
+      status: args.status,
+      adminComment: adminComment && adminComment.length > 0 ? adminComment : undefined,
+      statusUpdatedAt: nowIso,
+      updatedAt: nowIso
+    });
+
+    return {
+      id: args.id,
+      status: args.status,
+      adminComment: adminComment && adminComment.length > 0 ? adminComment : null,
+      statusUpdatedAt: nowIso,
+      updatedAt: nowIso
+    };
+  }
+});
+
+export const getById = query({
+  args: {
+    id: v.id('complaints')
+  },
+  handler: async (ctx: QueryCtx, args) => {
+    return ctx.db.get(args.id);
+  }
+});
+
+export const findByReference = query({
+  args: {
+    reference: v.string()
+  },
+  handler: async (ctx: QueryCtx, args) => {
+    return ctx.db
+      .query('complaints')
+      .withIndex('by_reference', (q) => q.eq('referenceNumber', args.reference))
+      .first();
   }
 });
 
@@ -215,7 +280,7 @@ async function upsertDictValue(
 
   const existing = await ctx.db
     .query('dict_values')
-    .withIndex('by_kind_value', (builder: IndexRangeBuilder<any, any>) => builder.eq('kind', kind))
+    .withIndex('by_kind_value', (index) => index.eq('kind', kind))
     .filter((builder: FilterBuilder<any>) => builder.eq(builder.field('value'), value))
     .first();
 

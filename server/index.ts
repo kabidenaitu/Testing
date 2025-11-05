@@ -30,7 +30,9 @@ const envSchema = z.object({
     .transform((value) => {
       const trimmed = value?.trim() ?? '';
       return trimmed.length > 0 ? trimmed : null;
-    })
+    }),
+  ADMIN_USERNAME: z.string().min(1).default('admin'),
+  ADMIN_PASSWORD: z.string().min(1)
 });
 
 const env = envSchema.parse({
@@ -40,7 +42,9 @@ const env = envSchema.parse({
   MAX_IMAGE_BYTES: process.env.MAX_IMAGE_BYTES,
   MAX_VIDEO_BYTES: process.env.MAX_VIDEO_BYTES,
   MAX_AUDIO_BYTES: process.env.MAX_AUDIO_BYTES,
-  CONVEX_URL: process.env.CONVEX_URL
+  CONVEX_URL: process.env.CONVEX_URL,
+  ADMIN_USERNAME: process.env.ADMIN_USERNAME,
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD
 });
 
 const llmBaseUrl = env.LLM_URL.endsWith('/') ? env.LLM_URL : `${env.LLM_URL}/`;
@@ -102,13 +106,46 @@ const upload = multer({
 });
 
 const app = express();
+const adminCredentials = {
+  username: env.ADMIN_USERNAME,
+  password: env.ADMIN_PASSWORD
+};
+const adminAuthRealm = 'QalaVoice Admin';
+const basicPrefix = 'Basic ';
 
 app.use(cors());
 // Текстовые payload'ы от фронтенда небольшие, поэтому 1 МБ достаточно.
 app.use(express.json({ limit: '1mb' }));
 
+const requireAdminAuth = (req: Request, res: Response, next: NextFunction) => {
+  const credentials = extractBasicCredentials(req.headers.authorization);
+
+  if (
+    !credentials ||
+    credentials.username !== adminCredentials.username ||
+    credentials.password !== adminCredentials.password
+  ) {
+    res.setHeader('WWW-Authenticate', `Basic realm="${adminAuthRealm}", charset="UTF-8"`);
+    res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: 'Требуется авторизация.'
+    });
+    return;
+  }
+
+  next();
+};
+
 const priorityValues = ['low', 'medium', 'high', 'critical'] as const;
-const statusValues = ['new', 'in_review', 'forwarded', 'closed'] as const;
+const statusValues = ['pending', 'approved', 'resolved', 'rejected'] as const;
+const legacyStatusValues = ['new', 'in_review', 'forwarded', 'closed'] as const;
+const allStatusValues = [...statusValues, ...legacyStatusValues] as const;
+const legacyStatusMapping: Record<(typeof legacyStatusValues)[number], (typeof statusValues)[number]> = {
+  new: 'pending',
+  in_review: 'pending',
+  forwarded: 'approved',
+  closed: 'resolved'
+};
 const sourceValues = ['web', 'telegram'] as const;
 const tuplePlaceKinds = ['stop', 'street', 'crossroad'] as const;
 
@@ -161,7 +198,25 @@ const submitPayloadSchema = z
     source: z.enum(sourceValues).default('web'),
     submissionTime: z.string().optional(),
     reportedTime: z.string().optional(),
-    status: z.enum(statusValues).optional()
+    status: z.enum(statusValues).optional(),
+    adminComment: z
+      .string()
+      .max(2000, 'Комментарий слишком длинный.')
+      .optional()
+  })
+  .strict();
+
+const statusUpdateSchema = z
+  .object({
+    status: z.enum(statusValues),
+    adminComment: z
+      .union([
+        z
+          .string()
+          .max(2000, 'Комментарий слишком длинный.'),
+        z.null()
+      ])
+      .optional()
   })
   .strict();
 
@@ -171,6 +226,10 @@ const convexClient = env.CONVEX_URL
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+app.post('/api/admin/session', requireAdminAuth, (_req, res) => {
+  res.status(204).send();
 });
 
 app.post('/api/analyze', async (req, res, next) => {
@@ -279,7 +338,8 @@ app.post('/api/submit', async (req, res, next) => {
         source: payload.source,
         submissionTime,
         reportedTime,
-        status: payload.status
+        status: payload.status,
+        adminComment: normalizeAdminComment(payload.adminComment)
       }
     });
 
@@ -302,7 +362,7 @@ app.post('/api/submit', async (req, res, next) => {
   }
 });
 
-app.get('/api/analytics/summary', async (_req, res, next) => {
+app.get('/api/analytics/summary', requireAdminAuth, async (_req, res, next) => {
   try {
     const client = getConvexClientOrRespond(res);
     if (!client) {
@@ -312,6 +372,124 @@ app.get('/api/analytics/summary', async (_req, res, next) => {
     const summary = await client.query(anyApi.analytics.summary, {});
     res.json(summary);
   } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/complaints/status/:reference', async (req, res, next) => {
+  try {
+    const client = getConvexClientOrRespond(res);
+    if (!client) {
+      return;
+    }
+
+    const reference = parseOptionalString(req.params.reference);
+    if (!reference) {
+      res.status(400).json({
+        error: 'INVALID_REFERENCE',
+        message: 'Номер обращения должен быть указан.'
+      });
+      return;
+    }
+
+    const complaint = await client.query(anyApi.complaints.findByReference, {
+      reference
+    });
+
+    if (!complaint) {
+      res.status(404).json({
+        error: 'NOT_FOUND',
+        message: 'Обращение с указанным номером не найдено.'
+      });
+      return;
+    }
+
+    res.json(mapComplaintStatusDocument(complaint as Record<string, unknown>));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/complaints', requireAdminAuth, async (req, res, next) => {
+  try {
+    const client = getConvexClientOrRespond(res);
+    if (!client) {
+      return;
+    }
+
+    const limit = parseOptionalNumber(req.query.limit);
+    const cursor = parseOptionalString(req.query.cursor);
+    const filters = buildComplaintsFilters(req.query);
+
+    const result = await client.query(anyApi.complaints.list, {
+      limit: limit ?? undefined,
+      cursor: cursor ?? undefined,
+      filters: filters ?? undefined
+    });
+
+    const { page, isDone, continueCursor } = result as {
+      page: Array<Record<string, unknown>>;
+      isDone: boolean;
+      continueCursor?: string | null;
+    };
+
+    res.json({
+      items: page.map(mapComplaintDocument),
+      nextCursor: isDone ? null : continueCursor ?? null
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/complaints/:id', requireAdminAuth, async (req, res, next) => {
+  try {
+    const client = getConvexClientOrRespond(res);
+    if (!client) {
+      return;
+    }
+
+    const complaintId = parseOptionalString(req.params.id);
+    if (!complaintId) {
+      res.status(400).json({
+        error: 'INVALID_ID',
+        message: 'Некорректный идентификатор обращения.'
+      });
+      return;
+    }
+
+    const payload = statusUpdateSchema.parse(req.body ?? {});
+    const normalizedComment =
+      payload.adminComment === null
+        ? null
+        : normalizeAdminComment(payload.adminComment);
+
+    await client.mutation(anyApi.complaints.updateStatus, {
+      id: complaintId,
+      status: payload.status,
+      adminComment: normalizedComment ?? null
+    });
+
+    const updated = await client.query(anyApi.complaints.getById, { id: complaintId });
+    if (!updated) {
+      res.status(404).json({
+        error: 'NOT_FOUND',
+        message: 'Обращение не найдено.'
+      });
+      return;
+    }
+
+    res.json(mapComplaintDocument(updated as Record<string, unknown>));
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        error: 'INVALID_PAYLOAD',
+        message: 'Некорректное тело запроса.',
+        details: error.flatten()
+      });
+      return;
+    }
+
     next(error);
   }
 });
@@ -339,6 +517,40 @@ app.use(
 app.listen(env.PORT, () => {
   console.log(`[server] listening on http://localhost:${env.PORT}`);
 });
+
+function extractBasicCredentials(
+  header: string | undefined
+): { username: string; password: string } | null {
+  if (!header?.startsWith(basicPrefix)) {
+    return null;
+  }
+
+  const base64 = header.slice(basicPrefix.length).trim();
+  if (!base64) {
+    return null;
+  }
+
+  let decoded: string;
+  try {
+    decoded = Buffer.from(base64, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+
+  const separatorIndex = decoded.indexOf(':');
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  const username = decoded.slice(0, separatorIndex);
+  const password = decoded.slice(separatorIndex + 1);
+
+  if (!username || !password) {
+    return null;
+  }
+
+  return { username, password };
+}
 
 function detectMediaCategory(mime: string): MediaCategory | null {
   if (mime.startsWith('image/')) {
@@ -425,4 +637,130 @@ interface UploadResponse {
   width?: number;
   height?: number;
   durationSec?: number;
+}
+
+function parseOptionalNumber(value: unknown): number | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function parseOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseEnumParam<T extends readonly string[]>(
+  value: unknown,
+  allowed: T
+): T[number] | undefined {
+  const str = parseOptionalString(value);
+  if (!str) {
+    return undefined;
+  }
+
+  return allowed.includes(str as T[number]) ? (str as T[number]) : undefined;
+}
+
+function buildComplaintsFilters(
+  query: Request['query']
+): {
+  priority?: (typeof priorityValues)[number];
+  source?: (typeof sourceValues)[number];
+  status?: (typeof statusValues)[number];
+  search?: string;
+} | null {
+  const priority = parseEnumParam(query.priority, priorityValues);
+  const source = parseEnumParam(query.source, sourceValues);
+  const status = parseEnumParam(query.status, statusValues);
+  const search = parseOptionalString(query.search);
+
+  const filters = {
+    priority,
+    source,
+    status,
+    search
+  };
+
+  return Object.values(filters).some((value) => value !== undefined) ? filters : null;
+}
+
+function mapComplaintDocument(doc: Record<string, unknown>) {
+  return {
+    id: serializeId(doc._id),
+    referenceNumber: typeof doc.referenceNumber === 'string' ? doc.referenceNumber : null,
+    priority: typeof doc.priority === 'string' ? doc.priority : null,
+    status: canonicalizeStatus(doc.status),
+    source: typeof doc.source === 'string' ? doc.source : null,
+    submissionTime: typeof doc.submissionTime === 'string' ? doc.submissionTime : null,
+    reportedTime: typeof doc.reportedTime === 'string' ? doc.reportedTime : null,
+    rawText: typeof doc.rawText === 'string' ? doc.rawText : null,
+    tuples: Array.isArray(doc.tuples) ? doc.tuples : [],
+    analysis: doc.analysis ?? null,
+    media: Array.isArray(doc.media) ? doc.media : [],
+    isAnonymous: typeof doc.isAnonymous === 'boolean' ? doc.isAnonymous : null,
+    contact: doc.contact ?? null,
+    adminComment: normalizeAdminCommentForResponse(doc.adminComment),
+    statusUpdatedAt: typeof doc.statusUpdatedAt === 'string' ? doc.statusUpdatedAt : null,
+    createdAt: typeof doc.createdAt === 'string' ? doc.createdAt : null,
+    updatedAt: typeof doc.updatedAt === 'string' ? doc.updatedAt : null
+  };
+}
+
+function mapComplaintStatusDocument(doc: Record<string, unknown>) {
+  return {
+    referenceNumber: typeof doc.referenceNumber === 'string' ? doc.referenceNumber : '',
+    status: canonicalizeStatus(doc.status),
+    priority: typeof doc.priority === 'string' ? doc.priority : null,
+    submissionTime: typeof doc.submissionTime === 'string' ? doc.submissionTime : null,
+    reportedTime: typeof doc.reportedTime === 'string' ? doc.reportedTime : null,
+    statusUpdatedAt: typeof doc.statusUpdatedAt === 'string' ? doc.statusUpdatedAt : null,
+    adminComment: normalizeAdminCommentForResponse(doc.adminComment)
+  };
+}
+
+function canonicalizeStatus(value: unknown): (typeof statusValues)[number] | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  if ((statusValues as readonly string[]).includes(value as (typeof statusValues)[number])) {
+    return value as (typeof statusValues)[number];
+  }
+
+  return legacyStatusMapping[value as (typeof legacyStatusValues)[number]] ?? null;
+}
+
+function normalizeAdminComment(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeAdminCommentForResponse(value: unknown): string | null {
+  const normalized = normalizeAdminComment(value);
+  return normalized ?? null;
+}
+
+function serializeId(value: unknown): string {
+  if (!value) {
+    return '';
+  }
+
+  return typeof value === 'string' ? value : String(value);
 }

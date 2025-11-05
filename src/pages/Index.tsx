@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { FormEvent, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Header } from '@/components/Layout/Header';
 import { Footer } from '@/components/Layout/Footer';
@@ -10,20 +10,35 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
 import { useLanguage } from '@/contexts/LanguageContext';
 import {
   AnalyzeResponse,
   ClarificationHistoryItem,
   ComplaintDraft,
   ComplaintPreview,
+  ComplaintStatusInfo,
+  Priority,
   MediaFile,
   UploadedMedia
 } from '@/types/complaint';
-import { analyzeComplaint, submitComplaint, uploadMedia } from '@/services/api';
+import {
+  analyzeComplaint,
+  fetchComplaintStatus,
+  submitComplaint,
+  uploadMedia
+} from '@/services/api';
 import { toast } from '@/hooks/use-toast';
 import { Loader2, Send } from 'lucide-react';
 import heroImage from '@/assets/hero-transit.jpg';
 import { ClarificationChat } from '@/components/Wizard/ClarificationChat';
+
+const StatusInfoItem = ({ label, value }: { label: string; value: string }) => (
+  <div>
+    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+    <p className="mt-1 text-sm font-semibold">{value || '—'}</p>
+  </div>
+);
 
 const Index = () => {
   const { t, language } = useLanguage();
@@ -36,6 +51,11 @@ const Index = () => {
   const [contactName, setContactName] = useState('');
   const [contactPhone, setContactPhone] = useState('');
   const [contactEmail, setContactEmail] = useState('');
+
+  const [statusReference, setStatusReference] = useState('');
+  const [statusResult, setStatusResult] = useState<ComplaintStatusInfo | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   const [submissionTimeIso, setSubmissionTimeIso] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalyzeResponse | null>(null);
@@ -51,6 +71,48 @@ const Index = () => {
     [t]
   );
 
+  const statusDateFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(language === 'kz' ? 'kk-KZ' : 'ru-RU', {
+        dateStyle: 'short',
+        timeStyle: 'short'
+      }),
+    [language]
+  );
+
+  const formatStatusDate = (value: string | null | undefined) => {
+    if (!value) {
+      return '—';
+    }
+
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return '—';
+    }
+
+    return statusDateFormatter.format(parsed);
+  };
+
+  const translatePriorityLabel = (priority: Priority | null) => {
+    if (!priority) {
+      return '—';
+    }
+
+    const key = `priority.${priority}`;
+    const translated = t(key);
+    return translated === key ? priority : translated;
+  };
+
+  const translateStatusLabel = (status: string | null) => {
+    if (!status) {
+      return t('statusLookup.statusUnknown');
+    }
+
+    const key = `admin.status.${status}`;
+    const translated = t(key);
+    return translated === key ? status : translated;
+  };
+
   const resetClarificationState = () => {
     setClarificationHistory([]);
     setKnownFields({});
@@ -58,6 +120,38 @@ const Index = () => {
     setComplaintPreview(null);
     setComplaintDraft(null);
     setSubmissionTimeIso(null);
+  };
+
+  const runStatusLookup = async () => {
+    const trimmed = statusReference.trim();
+    if (!trimmed) {
+      setStatusError(t('statusLookup.errorRequired'));
+      setStatusResult(null);
+      return;
+    }
+
+    setStatusLoading(true);
+    setStatusError(null);
+    try {
+      const result = await fetchComplaintStatus(trimmed);
+      setStatusResult(result);
+    } catch (error) {
+      console.error('Status lookup failed', error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('HTTP 404')) {
+        setStatusError(t('statusLookup.errorNotFound'));
+      } else {
+        setStatusError(t('statusLookup.errorGeneric'));
+      }
+      setStatusResult(null);
+    } finally {
+      setStatusLoading(false);
+    }
+  };
+
+  const handleStatusSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await runStatusLookup();
   };
 
   const chooseClarifyingQuestion = (analysis: AnalyzeResponse): string => {
@@ -411,6 +505,80 @@ const Index = () => {
                     </Button>
                   </div>
                 </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="bg-gradient-to-b from-background via-muted/20 to-background py-16">
+          <div className="container mx-auto max-w-4xl px-4 md:px-6">
+            <div className="rounded-2xl border bg-card p-6 shadow-medium md:p-8">
+              <h2 className="text-2xl font-semibold">{t('statusLookup.title')}</h2>
+              <p className="mt-2 text-sm text-muted-foreground">{t('statusLookup.description')}</p>
+
+              <form
+                className="mt-6 flex flex-col gap-3 sm:flex-row"
+                onSubmit={handleStatusSubmit}
+              >
+                <Input
+                  value={statusReference}
+                  onChange={(event) => {
+                    setStatusReference(event.target.value);
+                    if (statusError) {
+                      setStatusError(null);
+                    }
+                  }}
+                  placeholder={t('statusLookup.placeholder')}
+                  className="flex-1"
+                  disabled={statusLoading}
+                />
+                <Button type="submit" className="gap-2" disabled={statusLoading}>
+                  {statusLoading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+                  {t('statusLookup.button')}
+                </Button>
+              </form>
+
+              {statusError && (
+                <p className="mt-4 text-sm text-destructive">{statusError}</p>
+              )}
+
+              {statusResult ? (
+                <div className="mt-6 space-y-4 rounded-xl border bg-muted/30 p-4 md:p-6">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Badge variant="secondary">{translateStatusLabel(statusResult.status)}</Badge>
+                    {statusResult.priority && (
+                      <Badge variant="outline">{translatePriorityLabel(statusResult.priority)}</Badge>
+                    )}
+                    <span className="text-xs text-muted-foreground">
+                      {t('statusLookup.updated')}:{' '}
+                      {formatStatusDate(statusResult.statusUpdatedAt ?? statusResult.submissionTime)}
+                    </span>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <StatusInfoItem
+                      label={t('statusLookup.referenceLabel')}
+                      value={statusResult.referenceNumber}
+                    />
+                    <StatusInfoItem
+                      label={t('statusLookup.submissionTime')}
+                      value={formatStatusDate(statusResult.submissionTime)}
+                    />
+                    <StatusInfoItem
+                      label={t('statusLookup.reportedTime')}
+                      value={formatStatusDate(statusResult.reportedTime)}
+                    />
+                  </div>
+
+                  <div>
+                    <Label className="text-sm font-medium">{t('statusLookup.comment')}</Label>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">
+                      {statusResult.adminComment ?? t('statusLookup.commentPlaceholder')}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-6 text-sm text-muted-foreground">{t('statusLookup.noResult')}</p>
               )}
             </div>
           </div>

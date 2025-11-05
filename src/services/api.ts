@@ -2,7 +2,13 @@ import {
   AnalyzeResponse,
   AnalyticsSummary,
   ComplaintDraft,
+  ComplaintRecord,
+  ComplaintStatusInfo,
+  ComplaintsListResponse,
+  ComplaintSource,
+  ComplaintStatus,
   MediaFile,
+  Priority,
   SubmitResponse,
   UploadedMedia
 } from '@/types/complaint';
@@ -14,6 +20,7 @@ interface AnalyzeResponseApi {
   tuples: AnalyzeResponse['tuples'];
   aspects_count: AnalyzeResponse['aspectsCount'];
   recommendation_kk: string;
+  recommendation_ru: string;
   language: AnalyzeResponse['language'];
   extracted_fields: {
     route_numbers: string[];
@@ -88,10 +95,13 @@ export const uploadMedia = async (file: File, kind?: MediaFile['type']): Promise
   return (await response.json()) as UploadedMedia;
 };
 
-export const fetchAnalyticsSummary = async (): Promise<AnalyticsSummary> => {
+export const fetchAnalyticsSummary = async (authorization?: string): Promise<AnalyticsSummary> => {
   const response = await fetch('/api/analytics/summary', {
     method: 'GET',
-    headers: { Accept: 'application/json' }
+    headers: {
+      Accept: 'application/json',
+      ...(authorization ? { Authorization: authorization } : {})
+    }
   });
 
   if (!response.ok) {
@@ -112,6 +122,140 @@ export const fetchAnalyticsSummary = async (): Promise<AnalyticsSummary> => {
   };
 };
 
+interface FetchComplaintsParams {
+  cursor?: string | null;
+  limit?: number;
+  priority?: Priority;
+  status?: ComplaintStatus;
+  source?: ComplaintSource;
+  search?: string;
+}
+
+export const fetchComplaints = async (
+  params: FetchComplaintsParams = {},
+  authorization?: string
+): Promise<ComplaintsListResponse> => {
+  const searchParams = new URLSearchParams();
+
+  if (params.limit) {
+    searchParams.set('limit', String(params.limit));
+  }
+  if (params.cursor) {
+    searchParams.set('cursor', params.cursor);
+  }
+  if (params.priority) {
+    searchParams.set('priority', params.priority);
+  }
+  if (params.status) {
+    searchParams.set('status', params.status);
+  }
+  if (params.source) {
+    searchParams.set('source', params.source);
+  }
+  if (params.search) {
+    searchParams.set('search', params.search);
+  }
+
+  const queryString = searchParams.toString();
+  const response = await fetch(`/api/complaints${queryString ? `?${queryString}` : ''}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      ...(authorization ? { Authorization: authorization } : {})
+    }
+  });
+
+  if (!response.ok) {
+    throw await buildHttpError(response, 'Не удалось получить список обращений.');
+  }
+
+  const payload = (await response.json()) as ComplaintsListResponse;
+  return {
+    items: (payload.items ?? []).map((item) => normalizeComplaintRecord(item)),
+    nextCursor: payload.nextCursor ?? null
+  };
+};
+
+interface UpdateComplaintPayload {
+  status: ComplaintStatus;
+  adminComment?: string | null;
+}
+
+export const updateComplaint = async (
+  id: string,
+  payload: UpdateComplaintPayload,
+  authorization?: string
+): Promise<ComplaintRecord> => {
+  const response = await fetch(`/api/complaints/${id}`, {
+    method: 'PATCH',
+    headers: {
+      ...JSON_HEADERS,
+      ...(authorization ? { Authorization: authorization } : {})
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    throw await buildHttpError(response, 'Не удалось обновить статус обращения.');
+  }
+
+  const data = (await response.json()) as ComplaintRecord;
+  return normalizeComplaintRecord(data);
+};
+
+export const fetchComplaintStatus = async (
+  reference: string
+): Promise<ComplaintStatusInfo> => {
+  const trimmed = reference.trim();
+  if (!trimmed) {
+    throw new Error('REFERENCE_REQUIRED');
+  }
+
+  const response = await fetch(`/api/complaints/status/${encodeURIComponent(trimmed)}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw await buildHttpError(response, 'Не удалось получить статус обращения.');
+  }
+
+  const payload = await response.json();
+  return {
+    referenceNumber: payload.referenceNumber ?? trimmed,
+    status: payload.status ?? null,
+    priority: payload.priority ?? null,
+    submissionTime: payload.submissionTime ?? null,
+    reportedTime: payload.reportedTime ?? null,
+    statusUpdatedAt: payload.statusUpdatedAt ?? null,
+    adminComment: payload.adminComment ?? null
+  };
+};
+
+function normalizeComplaintRecord(record: ComplaintRecord): ComplaintRecord {
+  return {
+    id: record.id,
+    referenceNumber: record.referenceNumber ?? null,
+    priority: record.priority ?? null,
+    status: record.status ?? null,
+    source: record.source ?? null,
+    submissionTime: record.submissionTime ?? null,
+    reportedTime: record.reportedTime ?? null,
+    rawText: record.rawText ?? null,
+    tuples: record.tuples ?? [],
+    analysis: record.analysis ?? null,
+    media: record.media ?? [],
+    isAnonymous: record.isAnonymous ?? null,
+    contact: record.contact ?? null,
+     adminComment: record.adminComment ?? null,
+     statusUpdatedAt: record.statusUpdatedAt ?? null,
+    createdAt: record.createdAt ?? null,
+    updatedAt: record.updatedAt ?? null
+  };
+}
+
 function mapAnalyzeResponse(data: AnalyzeResponseApi): AnalyzeResponse {
   return {
     needClarification: data.need_clarification,
@@ -120,6 +264,7 @@ function mapAnalyzeResponse(data: AnalyzeResponseApi): AnalyzeResponse {
     tuples: data.tuples ?? [],
     aspectsCount: data.aspects_count,
     recommendationKk: data.recommendation_kk,
+    recommendationRu: data.recommendation_ru,
     language: data.language,
     extractedFields: {
       routeNumbers: data.extracted_fields.route_numbers ?? [],
@@ -155,6 +300,7 @@ function serializeAnalysis(analysis: AnalyzeResponse) {
     tuples: analysis.tuples,
     aspects_count: analysis.aspectsCount,
     recommendation_kk: analysis.recommendationKk,
+    recommendation_ru: analysis.recommendationRu,
     language: analysis.language,
     extracted_fields: {
       route_numbers: analysis.extractedFields.routeNumbers,

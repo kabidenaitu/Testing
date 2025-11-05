@@ -5,3 +5,4 @@ accelerate>=0.29.0
 bitsandbytes>=0.43.0
 pydantic>=2.7.0
 torch>=2.1.0
+python-dotenv>=1.0,<2
