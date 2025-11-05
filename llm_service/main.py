@@ -105,7 +105,26 @@ def _load_tokenizer() -> AutoTokenizer:
 def _load_model() -> AutoModelForCausalLM:
     model_id = os.getenv("MODEL_ID", DEFAULT_MODEL_ID)
     use_4bit = os.getenv("USE_4BIT", "0").lower() in {"1", "true", "yes"}
-    kwargs: Dict[str, Any] = {"device_map": "auto"}
+    device_map_setting = os.getenv("DEVICE_MAP", "auto").lower()
+    kwargs: Dict[str, Any] = {}
+
+    resolved_device_map: Optional[str] = None
+    if device_map_setting != "none":
+        candidate = device_map_setting if device_map_setting != "auto" else "auto"
+        if candidate == "auto":
+            try:
+                import accelerate  # noqa: F401
+                resolved_device_map = "auto"
+            except ImportError:
+                logger.warning(
+                    "Accelerate не установлен, пропускаем device_map='auto'. "
+                    "Модель будет загружена с явным переносом на устройство."
+                )
+        else:
+            resolved_device_map = candidate
+
+    if resolved_device_map:
+        kwargs["device_map"] = resolved_device_map
 
     if use_4bit and BitsAndBytesConfig is not None:
         logger.info("Загружаем модель %s в 4-битном режиме", model_id)
@@ -118,9 +137,18 @@ def _load_model() -> AutoModelForCausalLM:
     else:
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         kwargs["torch_dtype"] = dtype
-        logger.info("Загружаем модель %s в стандартном режиме", model_id)
+        logger.info("Загружаем модель %s в стандартном режиме (dtype=%s)", model_id, dtype)
 
     model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True, **kwargs)
+
+    if not resolved_device_map:
+        if torch.cuda.is_available():
+            preferred_device = os.getenv("TORCH_DEVICE", "cuda")
+            logger.info("Переносим модель на устройство %s", preferred_device)
+            model.to(preferred_device)
+        else:
+            logger.info("Модель будет работать на CPU")
+
     return model
 
 
