@@ -153,7 +153,7 @@ export const list = query({
     }
 
     return query.order('desc').paginate({
-      limit,
+      numItems: limit,
       cursor: args.cursor ?? null
     });
   }
@@ -215,10 +215,8 @@ async function upsertDictValue(
 
   const existing = await ctx.db
     .query('dict_values')
-    .withIndex(
-      'by_kind_value',
-      (builder: IndexRangeBuilder<any, any>) => builder.eq('kind', kind).eq('value', value)
-    )
+    .withIndex('by_kind_value', (builder: IndexRangeBuilder<any, any>) => builder.eq('kind', kind))
+    .filter((builder: FilterBuilder<any>) => builder.eq(builder.field('value'), value))
     .first();
 
   if (existing) {
