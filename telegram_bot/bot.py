@@ -27,11 +27,14 @@ logging.basicConfig(
 logger = logging.getLogger("telegram_bot")
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+# Загружаем переменные сначала из корневого .env, затем из локального, чтобы было удобно.
+load_dotenv(Path.cwd() / ".env", override=False)
+load_dotenv(BASE_DIR / ".env", override=False)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_BASE = os.getenv("API_BASE", "http://localhost:8787").rstrip("/")
-DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "kk").lower()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+api_base_raw = os.getenv("API_BASE", "http://localhost:8787").strip()
+API_BASE = (api_base_raw or "http://localhost:8787").rstrip("/")
+DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "kk").strip().lower()
 if DEFAULT_LANGUAGE not in {"kk", "ru"}:
     DEFAULT_LANGUAGE = "kk"
 
