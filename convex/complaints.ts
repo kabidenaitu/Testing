@@ -1,5 +1,6 @@
-import { mutationGeneric, queryGeneric } from 'convex/server';
+import { mutationGeneric, queryGeneric, type QueryCtx, type MutationCtx } from 'convex/server';
 import { v, type Infer } from 'convex/values';
+import type { DataModel } from './_generated/dataModel';
 
 const priorityValidator = v.union(
   v.literal('low'),
@@ -69,7 +70,7 @@ export const create = mutationGeneric({
   args: {
     payload: complaintPayload
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx: MutationCtx<DataModel>, args) => {
     const { payload } = args;
     const nowIso = new Date().toISOString();
     const submissionTime = payload.submissionTime ?? nowIso;
@@ -122,34 +123,27 @@ export const list = queryGeneric({
       })
     )
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx: QueryCtx<DataModel>, args) => {
     const limit = normalizeLimit(args.limit);
     const filters = args.filters ?? {};
 
     let query = ctx.db.query('complaints').withIndex('by_submission_time', (q) => q);
 
     if (filters.priority) {
-      query = query.filter((doc) => doc.priority === filters.priority);
+      query = query.filter((q) => q.eq('priority', filters.priority));
     }
 
     if (filters.source) {
-      query = query.filter((doc) => doc.source === filters.source);
+      query = query.filter((q) => q.eq('source', filters.source));
     }
 
     if (filters.status) {
-      query = query.filter((doc) => doc.status === filters.status);
-    }
-
-    if (filters.search) {
-      const needle = filters.search.trim().toLowerCase();
-      if (needle.length > 0) {
-        query = query.filter((doc) => doc.rawText.toLowerCase().includes(needle));
-      }
+      query = query.filter((q) => q.eq('status', filters.status));
     }
 
     return query.order('desc').paginate({
       limit,
-      cursor: args.cursor
+      cursor: args.cursor ?? null
     });
   }
 });
@@ -171,7 +165,7 @@ function normalizeLimit(limit?: number | null) {
 }
 
 async function upsertDictionaries(
-  ctx: any,
+  ctx: MutationCtx<DataModel>,
   params: {
     tuples: Infer<typeof tupleValidator>[];
     submissionTime: string;
@@ -198,7 +192,7 @@ async function upsertDictionaries(
 }
 
 async function upsertDictValue(
-  ctx: any,
+  ctx: MutationCtx<DataModel>,
   kind: 'route' | 'place' | 'stop' | 'plate',
   rawValue: string,
   timestampIso: string
